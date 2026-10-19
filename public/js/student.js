@@ -36,9 +36,9 @@ export async function home() {
   const avg = done.length ? done.reduce((s, t) => s + +t.percent, 0) / done.length : null;
   const weak = stats.topics.filter((t) => t.max > 0).map((t) => ({ ...t, p: (t.earned / t.max) * 100 })).sort((a, b) => a.p - b.p).slice(0, 2);
   const main = layout(`
-    <div class="page-head"><div><h1>Chào ${esc(state.user.fullName.split(' ').pop())}! 👋</h1><p>Lớp ${esc(state.cls?.name || '—')} · Cố gắng hoàn thành bài đúng hạn nhé.</p></div>
+    <div class="page-head"><div><h1>Chào ${esc(state.user.fullName.split(' ').pop())}! 👋</h1><p>Lớp ${esc(state.cls?.name || '—')} · Cố gắng hoàn thành bài cô Loan giao đúng hạn nhé.</p></div>
       <a class="btn accent" href="#/practice">🎯 Luyện chuyên đề</a></div>
-    ${!state.user.classId ? '<div class="warnbox mb">Tài khoản của em chưa được xếp lớp. Hãy báo thầy cô.</div>' : ''}
+    ${!state.user.classId ? '<div class="warnbox mb">Tài khoản của em chưa được xếp lớp. Hãy báo cô Loan nhé.</div>' : ''}
     <div class="grid g4 mb">
       <div class="card kpi accent"><span class="v">${todo.length}</span><span class="l">bài cần làm</span></div>
       <div class="card kpi"><span class="v">${avg == null ? '—' : score10(avg)}</span><span class="l">điểm TB (thang 10)</span></div>
@@ -81,7 +81,7 @@ export async function assignments() {
   const list = await get('/my/assignments');
   const groups = { todo: [], done: [], late: [] };
   for (const a of list) { const s = statusOf(a); (s.done ? groups.done : s.can ? groups.todo : groups.late).push(a); }
-  layout(`<div class="page-head"><div><h1>Bài tập của lớp</h1><p>Bài thầy cô đã giao cho lớp ${esc(state.cls?.name || '')}</p></div></div>
+  layout(`<div class="page-head"><div><h1>Bài tập của lớp</h1><p>Bài cô Loan đã giao cho lớp ${esc(state.cls?.name || '')}</p></div></div>
     ${!list.length ? '<div class="card empty"><div class="big">📭</div>Chưa có bài nào được giao.</div>' : ''}
     ${groups.todo.length ? `<h2>Cần làm (${groups.todo.length})</h2><div class="grid g2 mb">${groups.todo.map(assignCard).join('')}</div>` : ''}
     ${groups.done.length ? `<h2>Đã nộp (${groups.done.length})</h2><div class="grid g2 mb">${groups.done.map(assignCard).join('')}</div>` : ''}

@@ -31,7 +31,7 @@ export async function fetchRange(url, start, end, { timeoutMs = 20000 } = {}) {
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res;
   try {
-    res = await fetch(url, { headers: { range: `bytes=${start}-${end}`, 'user-agent': 'Mozilla/5.0 EngPractice' }, redirect: 'follow', signal: ctrl.signal });
+    res = await fetch(url, { headers: { range: `bytes=${start}-${end}`, 'user-agent': 'Mozilla/5.0 TiengAnhCoLoan' }, redirect: 'follow', signal: ctrl.signal });
   } catch (e) {
     throw new Error(e.name === 'AbortError' ? 'Máy chủ chứa file nghe phản hồi quá chậm, hãy thử lại' : 'Không mở được link file nghe');
   } finally { clearTimeout(timer); }

@@ -108,7 +108,7 @@ route('POST', '/auth/login', null, async ({ body }) => {
 });
 route('POST', '/auth/register', null, async ({ body }) => {
   const cls = await one('SELECT * FROM classes WHERE upper(join_code)=upper($1)', [clean(body.joinCode, 20)]);
-  if (!cls) fail(400, 'Mã lớp không đúng. Hãy hỏi giáo viên mã lớp của em.');
+  if (!cls) fail(400, 'Mã lớp không đúng. Em hỏi cô Loan mã lớp nhé.');
   checkCreds(body.username, body.password);
   if (!clean(body.fullName)) fail(400, 'Vui lòng nhập họ tên');
   const u = await one('INSERT INTO users(username,password_hash,full_name,role,class_id) VALUES($1,$2,$3,$4,$5) RETURNING *',
@@ -162,7 +162,7 @@ route('POST', '/auth/google', null, async ({ body }) => {
   if (!u) {
     if (!body.joinCode) return json({ needsRegister: true, email: g.email, name: g.name }, 404);
     const cls = await one('SELECT * FROM classes WHERE upper(join_code)=upper($1)', [clean(body.joinCode, 20)]);
-    if (!cls) fail(400, 'Mã lớp không đúng. Hãy hỏi giáo viên mã lớp của em.');
+    if (!cls) fail(400, 'Mã lớp không đúng. Em hỏi cô Loan mã lớp nhé.');
     const username = await uniqueUsername(g.email.split('@')[0]);
     u = await one(`INSERT INTO users(username,password_hash,full_name,role,class_id,email,google_sub,password_set)
                    VALUES($1,$2,$3,'student',$4,$5,$6,false) RETURNING *`,

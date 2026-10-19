@@ -54,7 +54,7 @@ function reviewBox(q, r, { showAnswers, grading }) {
   if (!r) return '';
   const cls = r.pending ? 'rv-wait' : r.correct ? 'rv-ok' : 'rv-no';
   let html = '';
-  if (r.pending) html += `<b>⏳ Chờ giáo viên chấm</b>`;
+  if (r.pending) html += `<b>⏳ Chờ cô Loan chấm</b>`;
   else if (r.correct) html += `<b>✅ Đúng</b> <span class="muted">(+${r.earned} điểm)</span>`;
   else if (q.type === 'essay' || r.manual) html += `<b>📝 Giáo viên chấm: ${r.earned}/${r.max} điểm</b>`;
   else html += `<b>❌ Sai.</b> Em chọn/viết: <span class="yours">${givenText(q, r.given)}</span>`;
@@ -278,7 +278,7 @@ export async function result({ id }) {
         <div>
           <div class="kpi"><span class="v">${d.score} / ${d.maxScore}</span><span class="l">điểm theo đề (${pct(p)})</span></div>
           <div class="row mt-s"><span class="chip good">✓ ${right} đúng</span><span class="chip bad">✗ ${wrong} sai</span>${pendingN ? `<span class="chip warn">⏳ ${pendingN} chờ chấm</span>` : ''}</div>
-          ${d.needsGrading ? '<p class="small muted mt-s">Điểm sẽ được cập nhật khi giáo viên chấm phần tự luận.</p>' : ''}
+          ${d.needsGrading ? '<p class="small muted mt-s">Điểm sẽ được cập nhật khi cô Loan chấm phần tự luận.</p>' : ''}
           ${!d.showAnswers ? '<p class="small muted mt-s">Đáp án sẽ được hiển thị sau khi hết hạn nộp bài.</p>' : ''}
         </div>
       </div>

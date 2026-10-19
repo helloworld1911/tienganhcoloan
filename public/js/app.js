@@ -73,10 +73,10 @@ export function layout(html) {
   const here = location.hash.split('?')[0];
   const active = (href) => here === href || (href !== '#/admin' && href !== '#/home' && here.startsWith(href));
   app.innerHTML = `
-    <div class="topbar"><button id="menuBtn" aria-label="Mở menu">☰</button><b>EngPractice</b></div>
+    <div class="topbar"><button id="menuBtn" aria-label="Mở menu">☰</button><b>Tiếng Anh cô Loan</b></div>
     <div class="shell">
       <aside class="side" id="side">
-        <div class="brand"><span class="logo">E</span> EngPractice</div>
+        <div class="brand"><span class="logo">L</span> Tiếng Anh cô Loan</div>
         ${nav.map(([href, icon, label, badge]) => `<a class="nav ${active(href) ? 'active' : ''}" href="${href}"><span>${icon}</span>${label}${badge === 'pending' && state.pending ? `<span class="badge">${state.pending}</span>` : ''}</a>`).join('')}
         <div class="who">
           <b>${esc(state.user.fullName)}</b>
@@ -124,13 +124,13 @@ async function refreshPending() {
 function authFrame(formHtml) {
   app.innerHTML = `<div class="auth">
     <div class="art">
-      <div class="brand" style="padding:0"><span class="logo">E</span> EngPractice</div>
+      <div class="brand" style="padding:0"><span class="logo">L</span> Tiếng Anh cô Loan</div>
       <div>
-        <h1>Luyện tiếng Anh mỗi ngày, tiến bộ thấy rõ.</h1>
-        <p>Làm bài thầy cô giao, nộp là có điểm ngay, câu sai có đáp án và giải thích để tự ôn lại.</p>
-        <ul><li>Trắc nghiệm, điền từ, đọc hiểu, viết lại câu…</li><li>Luyện riêng chuyên đề còn yếu</li><li>Theo dõi tiến bộ qua từng bài</li></ul>
+        <h1>Làm bài cô Loan giao – tiến bộ từng ngày.</h1>
+        <p>Nộp bài là có điểm ngay. Câu nào sai, cô Loan đã chuẩn bị sẵn đáp án và lời giải thích để em tự ôn lại.</p>
+        <ul><li>Đủ dạng bài như đề thi: nghe, trắc nghiệm, đọc hiểu, viết lại câu…</li><li>Luyện thêm những chuyên đề em còn yếu</li><li>Cô Loan theo dõi tiến bộ của em qua từng bài</li></ul>
       </div>
-      <div class="small" style="color:#9aa5c0">© EngPractice</div>
+      <div class="small" style="color:#9aa5c0">© Tiếng Anh cô Loan</div>
       <div class="deco">Aa</div>
     </div>
     <div class="form"><div class="card">${formHtml}</div></div>
@@ -139,12 +139,12 @@ function authFrame(formHtml) {
 async function loginView() {
   if (state.user) { location.hash = isStaff() ? '#/admin' : '#/home'; return; }
   try { const st = await get('/setup/status'); if (st.needsSetup) { location.hash = '#/setup'; return; } } catch (e) { toast('Không kết nối được máy chủ: ' + e.message, 'err'); }
-  authFrame(`<h2>Đăng nhập</h2><p class="muted">Dùng tài khoản thầy cô cấp hoặc tài khoản em đã đăng ký.</p>
+  authFrame(`<h2>Đăng nhập</h2><p class="muted">Dùng tài khoản cô Loan cấp, tài khoản em đã đăng ký, hoặc Gmail.</p>
     <form id="f"><label class="f">Tên đăng nhập<input name="username" autocomplete="username" required autofocus></label>
     <label class="f">Mật khẩu<input name="password" type="password" autocomplete="current-password" required></label>
     <button class="btn block accent">Đăng nhập</button></form>
     <div class="or" id="gor" style="display:none">hoặc</div><div class="gbtn-wrap" id="gbtn"></div>
-    <p class="small muted mt">Học sinh mới? <a href="#/register">Đăng ký bằng mã lớp</a></p>`);
+    <p class="small muted mt">Học sinh mới của cô Loan? <a href="#/register">Đăng ký bằng mã lớp</a></p>`);
   bindAuth('/auth/login');
   googleButton($('#gbtn'), (credential) => googleLogin(credential)).then((ok) => { if (ok) $('#gor').style.display = ''; });
 }
@@ -161,7 +161,7 @@ async function googleLogin(credential, extra = {}) {
     if (!e.data?.needsRegister) { toast(e.message, 'err'); return; }
     const d = e.data;
     modal(`<h2>Tạo tài khoản học sinh</h2>
-      <p>Gmail <b>${esc(d.email)}</b> chưa có trong hệ thống. Nếu em là học sinh, nhập <b>mã lớp</b> thầy cô cho để tạo tài khoản.</p>
+      <p>Gmail <b>${esc(d.email)}</b> chưa có trong hệ thống. Nếu em là học sinh, nhập <b>mã lớp</b> cô Loan gửi để tạo tài khoản.</p>
       <p class="small muted">Thầy cô / học sinh đã có tài khoản: hãy đăng nhập bằng tên đăng nhập và mật khẩu, rồi vào <b>Tài khoản → Liên kết Gmail</b>.</p>
       <form id="gf" class="form-grid"><label class="f">Mã lớp<input name="joinCode" required style="text-transform:uppercase;letter-spacing:.1em"></label>
       <label class="f">Họ và tên<input name="fullName" value="${esc(d.name || '')}" required></label></form>
@@ -174,7 +174,7 @@ async function googleLogin(credential, extra = {}) {
   }
 }
 function registerView() {
-  authFrame(`<h2>Đăng ký học sinh</h2><p class="muted">Nhập <b>mã lớp</b> do thầy cô cung cấp.</p>
+  authFrame(`<h2>Đăng ký học sinh</h2><p class="muted">Nhập <b>mã lớp</b> cô Loan gửi cho lớp em.</p>
     <form id="f"><label class="f">Mã lớp<input name="joinCode" required style="text-transform:uppercase;letter-spacing:.1em"></label>
     <label class="f">Họ và tên<input name="fullName" required></label>
     <label class="f">Tên đăng nhập<input name="username" required pattern="[A-Za-z0-9._\\-]{3,40}" title="3–40 ký tự: chữ không dấu, số, . _ -"></label>

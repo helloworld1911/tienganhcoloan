@@ -138,7 +138,7 @@ function classForm(c = {}) {
 export async function classes() {
   layout('<div class="loading">Đang tải…</div>');
   const list = await get('/classes');
-  const main = layout(`<div class="page-head"><div><h1>Lớp & học sinh</h1><p>Mỗi lớp có <b>mã lớp</b> để học sinh tự đăng ký, hoặc thầy cô tạo tài khoản sẵn.</p></div>
+  const main = layout(`<div class="page-head"><div><h1>Lớp & học sinh</h1><p>Mỗi lớp có <b>mã lớp</b> để học sinh tự đăng ký, hoặc cô tạo sẵn tài khoản cho các em.</p></div>
     <button class="btn accent" id="add">+ Tạo lớp</button></div>
     <div class="grid g3">${list.map((c) => `<div class="card assign-card"><div class="row between"><span class="t">${esc(c.name)}</span><span class="chip">${gradeName(c.grade)}</span></div>
       <div class="meta"><span>👩‍🎓 ${c.student_count} học sinh</span><span>📮 ${c.assignment_count} bài đã giao</span></div>

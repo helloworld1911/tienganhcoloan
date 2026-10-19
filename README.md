@@ -1,4 +1,4 @@
-# EngPractice – Web luyện bài tập tiếng Anh theo lớp
+# Tiếng Anh cô Loan – Web luyện bài tập tiếng Anh theo lớp
 
 Giáo viên tải đề (Word/PDF) + đáp án lên → hệ thống tự quét và chia thành các dạng bài → giao cho lớp → học sinh làm bài, nộp là có điểm ngay kèm đáp án đúng và giải thích → giáo viên theo dõi tiến bộ trên dashboard.
 
