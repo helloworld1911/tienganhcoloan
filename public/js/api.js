@@ -6,7 +6,22 @@ export const session = {
   clear() { try { localStorage.removeItem(KEY); } catch {} },
 };
 
-export async function api(path, { method = 'GET', body, raw = false } = {}) {
+// Thanh tiến trình mảnh ở đầu trang khi đang chờ máy chủ
+let pending = 0, barTimer = null;
+function busy(d) {
+  pending += d;
+  let bar = document.getElementById('netbar');
+  if (!bar) { bar = document.createElement('div'); bar.id = 'netbar'; document.body.appendChild(bar); }
+  clearTimeout(barTimer);
+  if (pending > 0) barTimer = setTimeout(() => bar.classList.add('on'), 120);
+  else { bar.classList.remove('on'); }
+}
+
+export async function api(path, opts = {}) {
+  busy(1);
+  try { return await request(path, opts); } finally { busy(-1); }
+}
+async function request(path, { method = 'GET', body, raw = false } = {}) {
   const s = session.get();
   const res = await fetch('/api' + path, {
     method,

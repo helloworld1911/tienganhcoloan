@@ -271,3 +271,10 @@ details.transcript div { white-space: pre-line; margin-top: 8px; font-family: va
 .gbtn-wrap { display: flex; justify-content: center; min-height: 44px; }
 .or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: .85rem; margin: 14px 0; }
 .or::before, .or::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+
+/* thanh tiến trình khi chờ máy chủ */
+#netbar { position: fixed; top: 0; left: 0; height: 3px; width: 100%; z-index: 300; pointer-events: none; opacity: 0;
+  background: linear-gradient(90deg, transparent, var(--accent) 40%, var(--accent-2) 60%, transparent); background-size: 50% 100%;
+  background-repeat: no-repeat; transition: opacity .2s; }
+#netbar.on { opacity: 1; animation: netbar 1s linear infinite; }
+@keyframes netbar { from { background-position: -50% 0; } to { background-position: 150% 0; } }

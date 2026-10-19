@@ -1,70 +1,108 @@
-// Kết nối Postgres.
-// - Trên Netlify: Netlify Database tự cấp NETLIFY_DB_URL khi deploy (gói @netlify/database).
-// - Hoặc tự đặt DATABASE_URL (Neon, Supabase, Postgres bất kỳ) trong biến môi trường.
+// Kết nối Postgres – tối ưu cho Netlify Functions:
+// - Neon (DATABASE_URL chứa neon.tech, hoặc Netlify Database): dùng driver HTTP của Neon →
+//   không phải mở kết nối TCP/TLS mỗi lần hàm khởi động, mỗi truy vấn = 1 lượt HTTP.
+// - Postgres khác: dùng pool kết nối thường (pg).
+// - Chạy thử trên máy / kiểm thử: PGlite trong tiến trình (useLocalDb).
 import { getDatabase } from '@netlify/database';
-import { SCHEMA_SQL } from './schema.mjs';
+import { neon } from '@neondatabase/serverless';
+import { SCHEMA_SQL, SCHEMA_VERSION } from './schema.mjs';
 
-let pool = null;
+let driver = null;     // { kind, query(text, params) -> rows, batch([[text, params]]) -> rows[][] }
 let schemaReady = null;
-let localDb = null; // PGlite chạy trong tiến trình (chỉ dùng khi chạy thử trên máy / kiểm thử)
 
 /** Dùng PGlite trực tiếp thay cho Postgres (npm run local, kiểm thử). */
 export function useLocalDb(db) {
-  localDb = db;
-  pool = { query: (t, p) => db.query(t, p), connect: async () => ({ query: (t, p) => db.query(t, p), release() {} }) };
+  driver = {
+    kind: 'pglite',
+    query: async (t, p = []) => (await db.query(t, p)).rows,
+    batch: (list) => db.transaction(async (tx) => {
+      const out = [];
+      for (const [t, p = []] of list) out.push((await tx.query(t, p)).rows);
+      return out;
+    }),
+  };
 }
 
-function getPool() {
-  if (pool) return pool;
-  // Ưu tiên DATABASE_URL do bạn tự đặt (Neon/Supabase…), sau đó mới tới Netlify Database
-  const custom = process.env.DATABASE_URL || process.env.NETLIFY_DATABASE_URL;
-  if (!custom && !process.env.NETLIFY_DB_URL) {
+function connectionString() {
+  return process.env.DATABASE_URL || process.env.NETLIFY_DATABASE_URL || process.env.NETLIFY_DB_URL || '';
+}
+
+function getDriver() {
+  if (driver) return driver;
+  const url = connectionString();
+  if (!url) {
     throw new Error('Chưa kết nối cơ sở dữ liệu. Vào Netlify → Project configuration → Environment variables, thêm biến DATABASE_URL (chuỗi kết nối Neon) rồi deploy lại.');
   }
-  const conn = custom ? getDatabase({ connectionString: custom }) : getDatabase();
-  pool = conn.pool;
-  // Giới hạn số kết nối (chạy thử cục bộ với PGlite chỉ hỗ trợ 1 kết nối)
-  if (process.env.DB_POOL_MAX && pool.options) pool.options.max = +process.env.DB_POOL_MAX;
-  return pool;
+  const custom = process.env.DATABASE_URL || process.env.NETLIFY_DATABASE_URL;
+  const isNeon = custom ? /\.neon\.tech|neon\.build/i.test(custom) : process.env.NETLIFY_DB_DRIVER === 'serverless';
+  if (isNeon) {
+    const sql = custom ? neon(custom) : getDatabase().httpClient;
+    driver = {
+      kind: 'neon-http',
+      query: (t, p = []) => sql.query(t, p),
+      // nhiều câu lệnh trong 1 transaction, gửi trong 1 lượt HTTP
+      batch: (list) => sql.transaction(list.map(([t, p = []]) => sql.query(t, p))),
+    };
+  } else {
+    const conn = custom ? getDatabase({ connectionString: custom }) : getDatabase();
+    const pool = conn.pool;
+    if (process.env.DB_POOL_MAX && pool.options) pool.options.max = +process.env.DB_POOL_MAX;
+    driver = {
+      kind: 'pg',
+      query: async (t, p = []) => (await pool.query(t, p)).rows,
+      batch: async (list) => {
+        const c = await pool.connect();
+        try {
+          await c.query('BEGIN');
+          const out = [];
+          for (const [t, p = []] of list) out.push((await c.query(t, p)).rows);
+          await c.query('COMMIT');
+          return out;
+        } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+      },
+    };
+  }
+  return driver;
 }
 
-export function connectionFingerprint() {
-  return process.env.NETLIFY_DB_URL || process.env.DATABASE_URL || process.env.NETLIFY_DATABASE_URL || '';
-}
+export function driverKind() { return getDriver().kind; }
+export function connectionFingerprint() { return connectionString(); }
 
+/**
+ * Tạo/cập nhật bảng – chỉ chạy khi phiên bản lược đồ thay đổi.
+ * Bình thường mỗi lần hàm khởi động chỉ tốn 1 truy vấn kiểm tra.
+ */
 export async function ensureSchema() {
   if (!schemaReady) {
     schemaReady = (async () => {
-      for (const stmt of SCHEMA_SQL.split(/;\s*\n/).map((s) => s.trim()).filter(Boolean)) {
-        await getPool().query(stmt);
-      }
+      const d = getDriver();
+      try {
+        const r = await d.query(`SELECT value FROM app_meta WHERE key='schema'`);
+        if (r[0]?.value === SCHEMA_VERSION) return;
+      } catch { /* bảng app_meta chưa có */ }
+      for (const stmt of SCHEMA_SQL.split(/;\s*\n/).map((s) => s.trim()).filter(Boolean)) await d.query(stmt);
+      await d.query(`CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)`);
+      await d.query(`INSERT INTO app_meta(key,value) VALUES('schema',$1) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`, [SCHEMA_VERSION]);
     })().catch((e) => { schemaReady = null; throw e; });
   }
   return schemaReady;
 }
 
 export async function q(text, params = []) {
-  const res = await getPool().query(text, params);
-  return res.rows;
+  return getDriver().query(text, params);
 }
 export async function one(text, params = []) {
   const rows = await q(text, params);
   return rows[0] || null;
 }
+/** Chạy nhiều câu lệnh trong một transaction (một lượt gửi với Neon). */
+export async function batch(list) {
+  return getDriver().batch(list);
+}
 
-/** Chạy nhiều câu lệnh trong một transaction. fn nhận client có .query */
-export async function tx(fn) {
-  if (localDb) return localDb.transaction(async (t) => fn({ q: async (x, p = []) => (await t.query(x, p)).rows }));
-  const client = await getPool().connect();
-  try {
-    await client.query('BEGIN');
-    const out = await fn({ q: async (t, p = []) => (await client.query(t, p)).rows });
-    await client.query('COMMIT');
-    return out;
-  } catch (e) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw e;
-  } finally {
-    client.release();
-  }
+/** Đo độ trễ tới CSDL (ms) */
+export async function pingDb(times = 3) {
+  const out = [];
+  for (let i = 0; i < times; i++) { const t = Date.now(); await q('SELECT 1'); out.push(Date.now() - t); }
+  return Math.min(...out);
 }

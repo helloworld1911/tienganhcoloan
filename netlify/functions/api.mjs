@@ -1,7 +1,7 @@
 // ============================================================================
 //  API duy nhất cho toàn bộ ứng dụng: /api/*
 // ============================================================================
-import { q, one, tx, ensureSchema } from '../lib/db.mjs';
+import { q, one, batch, ensureSchema, pingDb, driverKind } from '../lib/db.mjs';
 import { hashPassword, verifyPassword, signToken, verifyToken, randomCode } from '../lib/auth.mjs';
 import { gradeAttempt, totals, stripAnswers } from '../lib/grade.mjs';
 import { putChunk, getChunk } from '../lib/storage.mjs';
@@ -25,6 +25,18 @@ const route = (method, pattern, role, handler) => {
   routes.push({ method, re, keys, role, handler });
 };
 
+// Nhớ thông tin tài khoản 20 giây trong mỗi phiên bản hàm → đỡ 1 truy vấn cho mỗi yêu cầu
+const userCache = new Map();
+async function loadUser(id) {
+  const hit = userCache.get(id);
+  if (hit && hit.exp > Date.now()) return hit.user;
+  const user = await one('SELECT id, username, full_name, role, class_id, active, email, google_sub, password_set FROM users WHERE id=$1', [id]);
+  if (userCache.size > 500) userCache.clear();
+  userCache.set(id, { user, exp: Date.now() + 20_000 });
+  return user;
+}
+const forgetUser = (id) => userCache.delete(+id);
+
 export default async function handler(req) {
   try {
     await ensureSchema();
@@ -43,7 +55,9 @@ export default async function handler(req) {
     const token = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
     if (token) {
       const p = verifyToken(token);
-      if (p) user = await one('SELECT id, username, full_name, role, class_id, active, email, google_sub, password_set FROM users WHERE id=$1', [p.sub]);
+      // mã khôi phục tạm thời: dùng được khi bảng users đang trống giữa lúc khôi phục
+      if (p?.restore && path.startsWith('/admin/restore/')) user = { id: p.sub, role: 'admin', active: true };
+      else if (p && !p.restore) user = await loadUser(p.sub);
       if (user && !user.active) user = null;
     }
     if (r.role === 'auth' && !user) fail(401, 'Bạn cần đăng nhập');
@@ -105,7 +119,7 @@ route('POST', '/me/password', 'auth', async ({ user, body }) => {
   const u = await one('SELECT password_hash, password_set FROM users WHERE id=$1', [user.id]);
   if (u.password_set && !verifyPassword(body.oldPassword, u.password_hash)) fail(400, 'Mật khẩu cũ không đúng');
   if (!body.newPassword || body.newPassword.length < 6) fail(400, 'Mật khẩu mới tối thiểu 6 ký tự');
-  await q('UPDATE users SET password_hash=$1, password_set=true WHERE id=$2', [hashPassword(body.newPassword), user.id]);
+  await q('UPDATE users SET password_hash=$1, password_set=true WHERE id=$2', [hashPassword(body.newPassword), user.id]); forgetUser(user.id);
   return { ok: true };
 });
 
@@ -159,12 +173,12 @@ route('POST', '/me/google', 'auth', async ({ body, user }) => {
   const g = await verifyGoogle(body.credential);
   const other = await one('SELECT id FROM users WHERE (google_sub=$1 OR lower(email)=$2) AND id<>$3', [g.sub, g.email, user.id]);
   if (other) fail(409, 'Gmail này đã được dùng cho một tài khoản khác');
-  await q('UPDATE users SET google_sub=$1, email=$2 WHERE id=$3', [g.sub, g.email, user.id]);
+  await q('UPDATE users SET google_sub=$1, email=$2 WHERE id=$3', [g.sub, g.email, user.id]); forgetUser(user.id);
   return { ok: true, email: g.email };
 });
 route('DELETE', '/me/google', 'auth', async ({ user }) => {
   if (user.password_set === false) fail(400, 'Hãy đặt mật khẩu trước khi bỏ liên kết Gmail (nếu không sẽ không đăng nhập được)');
-  await q('UPDATE users SET google_sub=NULL WHERE id=$1', [user.id]);
+  await q('UPDATE users SET google_sub=NULL WHERE id=$1', [user.id]); forgetUser(user.id);
   return { ok: true };
 });
 
@@ -216,6 +230,53 @@ route('GET', '/media/:id', null, async ({ params, req }) => {
       'cache-control': 'public, max-age=31536000, immutable',
     },
   });
+});
+
+// ================================================================ TỐC ĐỘ HỆ THỐNG
+route('GET', '/health', 'staff', async () => ({
+  dbMs: await pingDb(3),
+  driver: driverKind(),
+  region: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || null,
+  dbHost: ((process.env.DATABASE_URL || '').match(/@([^/:?]+)/) || [])[1]?.replace(/^[^.]+\./, '…') || null,
+}));
+
+
+// ================================================================ SAO LƯU / KHÔI PHỤC (chia nhỏ theo bảng, mỗi lượt < 3MB)
+const BACKUP_TABLES = ['classes', 'users', 'exams', 'assignments', 'attempts', 'attempt_items', 'media'];
+const SERIAL_TABLES = ['classes', 'users', 'exams', 'assignments', 'attempts'];
+const checkTable = (t) => { if (!BACKUP_TABLES.includes(t)) fail(400, 'Bảng không hợp lệ'); return t; };
+route('GET', '/admin/backup/:table', 'admin', async ({ params, query }) => {
+  const t = checkTable(params.table);
+  const offset = int(query.offset) || 0;
+  const order = t === 'attempt_items' ? 'x.attempt_id, x.qid' : 'x.id';
+  const rows = await q(`SELECT row_to_json(x) AS r FROM ${t} x ORDER BY ${order} LIMIT 300 OFFSET $1`, [offset]);
+  const out = [];
+  let size = 0;
+  for (const { r } of rows) {
+    const n = JSON.stringify(r).length;
+    if (out.length && size + n > 2_500_000) break;
+    out.push(r); size += n;
+  }
+  const more = rows.length === 300 || out.length < rows.length;
+  return { table: t, rows: out, next: more ? offset + out.length : null };
+});
+route('POST', '/admin/restore/begin', 'admin', async ({ body, user }) => {
+  if (body.confirm !== 'XOA_HET') fail(400, 'Thiếu xác nhận');
+  await q(`TRUNCATE ${BACKUP_TABLES.join(', ')} RESTART IDENTITY CASCADE`);
+  userCache.clear();
+  return { ok: true, restoreToken: signToken({ sub: user.id, role: 'admin', restore: true }, 1 / 24) };
+});
+route('POST', '/admin/restore/rows/:table', 'admin', async ({ params, body }) => {
+  const t = checkTable(params.table);
+  const rows = Array.isArray(body.rows) ? body.rows : [];
+  if (!rows.length) return { inserted: 0 };
+  const r = await q(`INSERT INTO ${t} SELECT * FROM json_populate_recordset(NULL::${t}, $1::json) ON CONFLICT DO NOTHING RETURNING 1`, [JSON.stringify(rows)]);
+  return { inserted: r.length };
+});
+route('POST', '/admin/restore/finish', 'admin', async () => {
+  await Promise.all(SERIAL_TABLES.map((t) => q(`SELECT setval(pg_get_serial_sequence('${t}','id'), COALESCE((SELECT max(id) FROM ${t}), 1), (SELECT max(id) FROM ${t}) IS NOT NULL)`)));
+  userCache.clear();
+  return { ok: true };
 });
 
 // ================================================================ LỚP HỌC
@@ -284,6 +345,7 @@ route('PUT', '/users/:id', 'staff', async ({ params, body, user }) => {
   if (body.password) { if (body.password.length < 6) fail(400, 'Mật khẩu tối thiểu 6 ký tự'); set('password_hash', hashPassword(body.password)); }
   if (body.role && user.role === 'admin' && ['admin', 'teacher', 'student'].includes(body.role)) set('role', body.role);
   if (!sets.length) return { ok: true };
+  forgetUser(params.id);
   args.push(params.id);
   return one(`UPDATE users SET ${sets.join(',')} WHERE id=$${args.length} RETURNING id,username,full_name,role,class_id,active,email`, args);
 });
@@ -292,6 +354,7 @@ route('DELETE', '/users/:id', 'staff', async ({ params, user }) => {
   const t = await one('SELECT role FROM users WHERE id=$1', [params.id]);
   if (t && t.role !== 'student' && user.role !== 'admin') fail(403, 'Không có quyền');
   await q('DELETE FROM users WHERE id=$1', [params.id]);
+  forgetUser(params.id);
 });
 
 // ================================================================ ĐỀ BÀI
@@ -388,7 +451,7 @@ route('GET', '/assignments/:id/results', 'staff', async ({ params }) => {
   const a = await one(`SELECT a.*, COALESCE(a.title,e.title) AS display_title, e.content, c.name AS class_name
                        FROM assignments a JOIN exams e ON e.id=a.exam_id JOIN classes c ON c.id=a.class_id WHERE a.id=$1`, [params.id]);
   if (!a) fail(404, 'Không tìm thấy bài đã giao');
-  const students = await q(`
+  const [students, items] = await Promise.all([q(`
     SELECT u.id, u.full_name, u.username,
       count(t.id) FILTER (WHERE t.status='submitted')::int AS attempts,
       max(t.percent) FILTER (WHERE t.status='submitted') AS best_percent,
@@ -398,9 +461,9 @@ route('GET', '/assignments/:id/results', 'staff', async ({ params }) => {
       bool_or(t.needs_grading) AS needs_grading
     FROM users u LEFT JOIN attempts t ON t.user_id=u.id AND t.assignment_id=$1
     WHERE u.class_id=$2 AND u.role='student'
-    GROUP BY u.id ORDER BY u.full_name`, [a.id, a.class_id]);
-  const items = await q(`SELECT i.qid, count(*)::int AS n, sum(CASE WHEN i.correct THEN 1 ELSE 0 END)::int AS right_n
-                         FROM attempt_items i JOIN attempts t ON t.id=i.attempt_id WHERE t.assignment_id=$1 AND NOT i.pending GROUP BY i.qid`, [a.id]);
+    GROUP BY u.id ORDER BY u.full_name`, [a.id, a.class_id]),
+  q(`SELECT i.qid, count(*)::int AS n, sum(CASE WHEN i.correct THEN 1 ELSE 0 END)::int AS right_n
+                         FROM attempt_items i JOIN attempts t ON t.id=i.attempt_id WHERE t.assignment_id=$1 AND NOT i.pending GROUP BY i.qid`, [a.id])]);
   const qmap = {};
   for (const p of a.content.parts) for (const x of p.questions) qmap[x.id] = { num: x.num ?? x.label, topic: p.topic, type: x.type, part: p.title, section: p.section };
   const itemStats = items.map((r) => ({ ...r, ...qmap[r.qid], rate: r.n ? Math.round((r.right_n / r.n) * 100) : 0 }))
@@ -434,16 +497,18 @@ route('GET', '/my/assignments', 'student', async ({ user }) => {
 
 /** Bắt đầu / tiếp tục làm bài */
 route('POST', '/my/assignments/:id/start', 'student', async ({ params, user }) => {
-  const a = await one(`SELECT a.*, e.content, e.title AS exam_title, e.time_limit AS exam_time FROM assignments a JOIN exams e ON e.id=a.exam_id
-                       WHERE a.id=$1 AND a.class_id=$2`, [params.id, user.class_id]);
+  // lấy bài, lượt đang làm dở và số lượt đã nộp trong MỘT truy vấn
+  const a = await one(`SELECT a.*, e.content, e.title AS exam_title, e.time_limit AS exam_time,
+      (SELECT row_to_json(t) FROM attempts t WHERE t.assignment_id=a.id AND t.user_id=$3 AND t.status='in_progress' ORDER BY t.id DESC LIMIT 1) AS cur,
+      (SELECT count(*)::int FROM attempts t WHERE t.assignment_id=a.id AND t.user_id=$3 AND t.status='submitted') AS done_n
+    FROM assignments a JOIN exams e ON e.id=a.exam_id WHERE a.id=$1 AND a.class_id=$2`, [params.id, user.class_id, user.id]);
   if (!a) fail(404, 'Không tìm thấy bài tập');
   if (a.opens_at && new Date(a.opens_at) > new Date()) fail(403, 'Bài chưa mở');
-  let t = await one(`SELECT * FROM attempts WHERE assignment_id=$1 AND user_id=$2 AND status='in_progress' ORDER BY id DESC LIMIT 1`, [a.id, user.id]);
+  let t = a.cur;
   if (!t) {
     if (a.status === 'closed') fail(403, 'Bài đã đóng');
     if (a.due_at && new Date(a.due_at) < new Date()) fail(403, 'Đã quá hạn nộp bài');
-    const c = await one(`SELECT count(*)::int AS n FROM attempts WHERE assignment_id=$1 AND user_id=$2 AND status='submitted'`, [a.id, user.id]);
-    if (a.max_attempts > 0 && c.n >= a.max_attempts) fail(403, `Em đã làm hết ${a.max_attempts} lượt cho bài này`);
+    if (a.max_attempts > 0 && a.done_n >= a.max_attempts) fail(403, `Em đã làm hết ${a.max_attempts} lượt cho bài này`);
     t = await one(`INSERT INTO attempts(user_id,class_id,assignment_id,exam_id,kind,title) VALUES($1,$2,$3,$4,'assignment',$5) RETURNING *`,
       [user.id, user.class_id, a.id, a.exam_id, a.title || a.exam_title]);
   }
@@ -471,16 +536,17 @@ route('POST', '/attempts/:id/submit', 'student', async ({ params, user, body }) 
   const answers = body.answers || t.answers || {};
   const g = gradeAttempt(content, answers);
   const duration = Math.max(0, Math.round((Date.now() - new Date(t.started_at).getTime()) / 1000));
-  await tx(async (c) => {
-    await c.q(`UPDATE attempts SET status='submitted', answers=$1, results=$2, score=$3, max_score=$4, percent=$5, needs_grading=$6,
-               submitted_at=now(), duration_sec=$7 WHERE id=$8`,
-    [answers, JSON.stringify(g.results), g.score, g.max, g.percent, g.pending, duration, t.id]);
-    for (const r of g.results) {
-      await c.q(`INSERT INTO attempt_items(attempt_id,qid,user_id,class_id,topic,qtype,correct,earned,max,pending)
-                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`,
-      [t.id, r.id, user.id, user.class_id, r.topic, r.type, r.correct, r.earned, r.max, r.pending]);
-    }
-  });
+  // ghi kết quả + từng câu trong MỘT lượt (trước đây mỗi câu một lượt → rất chậm)
+  const items = g.results.map((r) => ({ qid: r.id, topic: r.topic, qtype: r.type, correct: r.correct, earned: r.earned, max: r.max, pending: r.pending }));
+  await batch([
+    [`UPDATE attempts SET status='submitted', answers=$1, results=$2, score=$3, max_score=$4, percent=$5, needs_grading=$6,
+      submitted_at=now(), duration_sec=$7 WHERE id=$8`,
+    [answers, JSON.stringify(g.results), g.score, g.max, g.percent, g.pending, duration, t.id]],
+    [`INSERT INTO attempt_items(attempt_id,qid,user_id,class_id,topic,qtype,correct,earned,max,pending)
+      SELECT $1, x.qid, $2, $3, x.topic, x.qtype, x.correct, x.earned, x.max, x.pending
+      FROM jsonb_to_recordset($4::jsonb) AS x(qid text, topic text, qtype text, correct boolean, earned numeric, max numeric, pending boolean)
+      ON CONFLICT DO NOTHING`, [t.id, user.id, user.class_id, JSON.stringify(items)]],
+  ]);
   return attemptView(t.id, user);
 });
 
@@ -585,20 +651,22 @@ route('POST', '/attempts/:id/grade', 'staff', async ({ params, body, user }) => 
     r.earned = earned; r.pending = false; r.correct = earned >= Number(r.max); r.comment = clean(it.comment, 2000); r.manual = true;
   }
   const tt = totals(results);
-  await tx(async (c) => {
-    await c.q('UPDATE attempts SET results=$1, score=$2, max_score=$3, percent=$4, needs_grading=$5 WHERE id=$6',
-      [JSON.stringify(results), tt.score, tt.max, tt.percent, tt.pending, t.id]);
-    for (const r of results) if (items[r.id]) {
-      await c.q('UPDATE attempt_items SET earned=$1, correct=$2, pending=false WHERE attempt_id=$3 AND qid=$4', [r.earned, r.correct, t.id, r.id]);
-    }
-  });
+  const changed = results.filter((r) => items[r.id]).map((r) => ({ qid: r.id, earned: r.earned, correct: r.correct }));
+  await batch([
+    ['UPDATE attempts SET results=$1, score=$2, max_score=$3, percent=$4, needs_grading=$5 WHERE id=$6',
+      [JSON.stringify(results), tt.score, tt.max, tt.percent, tt.pending, t.id]],
+    [`UPDATE attempt_items i SET earned=x.earned, correct=x.correct, pending=false
+      FROM jsonb_to_recordset($2::jsonb) AS x(qid text, earned numeric, correct boolean)
+      WHERE i.attempt_id=$1 AND i.qid=x.qid`, [t.id, JSON.stringify(changed)]],
+  ]);
   return attemptView(t.id, user);
 });
 route('DELETE', '/attempts/:id', 'staff', async ({ params }) => { await q('DELETE FROM attempts WHERE id=$1', [params.id]); });
 
 // ================================================================ DASHBOARD
 route('GET', '/dashboard/overview', 'staff', async () => {
-  const classes = await q(`
+  // các truy vấn độc lập → chạy song song
+  const [classes, topics, trend, totals_] = await Promise.all([q(`
     SELECT c.id, c.name, c.grade, c.join_code,
       (SELECT count(*)::int FROM users u WHERE u.class_id=c.id AND u.role='student' AND u.active) AS students,
       (SELECT count(*)::int FROM assignments a WHERE a.class_id=c.id) AS assignments,
@@ -607,23 +675,24 @@ route('GET', '/dashboard/overview', 'staff', async () => {
       (SELECT count(DISTINCT (t.user_id, t.assignment_id))::int FROM attempts t JOIN assignments a ON a.id=t.assignment_id
         WHERE a.class_id=c.id AND t.status='submitted') AS done_pairs,
       (SELECT count(*)::int FROM attempts t WHERE t.class_id=c.id AND t.submitted_at > now() - interval '7 days') AS week_submissions
-    FROM classes c ORDER BY c.grade NULLS LAST, c.name`);
-  const topics = await q(`SELECT c.grade, i.topic, sum(i.earned)::float AS earned, sum(i.max)::float AS max
-                          FROM attempt_items i JOIN classes c ON c.id=i.class_id WHERE NOT i.pending GROUP BY c.grade, i.topic`);
-  const trend = await q(`SELECT c.grade, date_trunc('week', t.submitted_at) AS week, round(avg(t.percent),1)::float AS avg, count(*)::int AS n
+    FROM classes c ORDER BY c.grade NULLS LAST, c.name`),
+  q(`SELECT c.grade, i.topic, sum(i.earned)::float AS earned, sum(i.max)::float AS max
+                          FROM attempt_items i JOIN classes c ON c.id=i.class_id WHERE NOT i.pending GROUP BY c.grade, i.topic`),
+  q(`SELECT c.grade, date_trunc('week', t.submitted_at) AS week, round(avg(t.percent),1)::float AS avg, count(*)::int AS n
                          FROM attempts t JOIN classes c ON c.id=t.class_id WHERE t.status='submitted' AND t.submitted_at > now() - interval '16 weeks'
-                         GROUP BY c.grade, week ORDER BY week`);
-  const totals_ = await one(`SELECT (SELECT count(*)::int FROM users WHERE role='student') AS students,
+                         GROUP BY c.grade, week ORDER BY week`),
+  one(`SELECT (SELECT count(*)::int FROM users WHERE role='student') AS students,
       (SELECT count(*)::int FROM exams) AS exams, (SELECT count(*)::int FROM attempts WHERE status='submitted') AS submissions,
-      (SELECT count(*)::int FROM attempts WHERE needs_grading) AS pending`);
+      (SELECT count(*)::int FROM attempts WHERE needs_grading) AS pending`)]);
   return { classes, topics, trend, totals: totals_ };
 });
 
 route('GET', '/dashboard/class/:id', 'staff', async ({ params }) => {
-  const cls = await one('SELECT * FROM classes WHERE id=$1', [params.id]);
-  if (!cls) fail(404, 'Không tìm thấy lớp');
-  const assignCount = (await one('SELECT count(*)::int AS n FROM assignments WHERE class_id=$1', [cls.id])).n;
-  const students = await q(`
+  const cid = int(params.id);
+  const [cls, ac, students, topics, studentTopics, trend, assignments] = await Promise.all([
+    one('SELECT * FROM classes WHERE id=$1', [cid]),
+    one('SELECT count(*)::int AS n FROM assignments WHERE class_id=$1', [cid]),
+    q(`
     SELECT u.id, u.full_name, u.username, u.active, u.last_login, u.email, u.class_id,
       count(t.id) FILTER (WHERE t.status='submitted')::int AS submissions,
       count(DISTINCT t.assignment_id) FILTER (WHERE t.status='submitted')::int AS done_assignments,
@@ -632,47 +701,57 @@ route('GET', '/dashboard/class/:id', 'staff', async ({ params }) => {
       max(t.submitted_at) AS last_submitted,
       (array_agg(t.percent ORDER BY t.submitted_at) FILTER (WHERE t.status='submitted' AND t.kind='assignment')) AS series
     FROM users u LEFT JOIN attempts t ON t.user_id=u.id
-    WHERE u.class_id=$1 AND u.role='student' GROUP BY u.id ORDER BY u.full_name`, [cls.id]);
-  const topics = await q(`SELECT topic, sum(earned)::float AS earned, sum(max)::float AS max, count(*)::int AS n
-                          FROM attempt_items WHERE class_id=$1 AND NOT pending GROUP BY topic`, [cls.id]);
-  const studentTopics = await q(`SELECT user_id, topic, sum(earned)::float AS earned, sum(max)::float AS max
-                                 FROM attempt_items WHERE class_id=$1 AND NOT pending GROUP BY user_id, topic`, [cls.id]);
-  const trend = await q(`SELECT date_trunc('week', submitted_at) AS week, round(avg(percent),1)::float AS avg, count(*)::int AS n
-                         FROM attempts WHERE class_id=$1 AND status='submitted' GROUP BY week ORDER BY week`, [cls.id]);
-  const assignments = await q(`SELECT a.id, COALESCE(a.title,e.title) AS title, a.due_at, a.created_at,
+    WHERE u.class_id=$1 AND u.role='student' GROUP BY u.id ORDER BY u.full_name`, [cid]),
+    q(`SELECT topic, sum(earned)::float AS earned, sum(max)::float AS max, count(*)::int AS n
+       FROM attempt_items WHERE class_id=$1 AND NOT pending GROUP BY topic`, [cid]),
+    q(`SELECT user_id, topic, sum(earned)::float AS earned, sum(max)::float AS max
+       FROM attempt_items WHERE class_id=$1 AND NOT pending GROUP BY user_id, topic`, [cid]),
+    q(`SELECT date_trunc('week', submitted_at) AS week, round(avg(percent),1)::float AS avg, count(*)::int AS n
+       FROM attempts WHERE class_id=$1 AND status='submitted' GROUP BY week ORDER BY week`, [cid]),
+    q(`SELECT a.id, COALESCE(a.title,e.title) AS title, a.due_at, a.created_at,
       (SELECT count(DISTINCT t.user_id)::int FROM attempts t WHERE t.assignment_id=a.id AND t.status='submitted') AS done,
       (SELECT round(avg(t.percent),1) FROM attempts t WHERE t.assignment_id=a.id AND t.status='submitted') AS avg_percent
-    FROM assignments a JOIN exams e ON e.id=a.exam_id WHERE a.class_id=$1 ORDER BY a.created_at`, [cls.id]);
-  return { class: cls, assignCount, students, topics, studentTopics, trend, assignments };
+    FROM assignments a JOIN exams e ON e.id=a.exam_id WHERE a.class_id=$1 ORDER BY a.created_at`, [cid]),
+  ]);
+  if (!cls) fail(404, 'Không tìm thấy lớp');
+  return { class: cls, assignCount: ac.n, students, topics, studentTopics, trend, assignments };
 });
 
 async function studentStats(userId) {
-  const u = await one(`SELECT u.id,u.full_name,u.username,u.class_id,u.last_login,u.created_at,c.name AS class_name,c.grade
-                       FROM users u LEFT JOIN classes c ON c.id=u.class_id WHERE u.id=$1`, [userId]);
+  const [u, attempts, topics, recentTopics, extra] = await Promise.all([
+    one(`SELECT u.id,u.full_name,u.username,u.class_id,u.last_login,u.created_at,c.name AS class_name,c.grade
+         FROM users u LEFT JOIN classes c ON c.id=u.class_id WHERE u.id=$1`, [userId]),
+    q(`SELECT id, kind, title, score, max_score, percent, needs_grading, submitted_at, duration_sec
+       FROM attempts WHERE user_id=$1 AND status='submitted' ORDER BY submitted_at`, [userId]),
+    q(`SELECT topic, sum(earned)::float AS earned, sum(max)::float AS max, count(*)::int AS n,
+         sum(CASE WHEN correct THEN 1 ELSE 0 END)::int AS right_n
+       FROM attempt_items WHERE user_id=$1 AND NOT pending GROUP BY topic`, [userId]),
+    q(`SELECT topic, sum(earned)::float AS earned, sum(max)::float AS max FROM attempt_items
+       WHERE user_id=$1 AND NOT pending AND submitted_at > now() - interval '30 days' GROUP BY topic`, [userId]),
+    // điểm TB lớp + số bài chưa làm (lấy lớp ngay trong truy vấn)
+    one(`SELECT
+        (SELECT round(avg(t.percent),1)::float FROM attempts t WHERE t.class_id=u.class_id AND t.status='submitted' AND t.kind='assignment') AS class_avg,
+        (SELECT count(*)::int FROM assignments a WHERE a.class_id=u.class_id AND a.status='published'
+          AND (a.due_at IS NULL OR a.due_at > now()) AND (a.opens_at IS NULL OR a.opens_at <= now())
+          AND NOT EXISTS (SELECT 1 FROM attempts t WHERE t.assignment_id=a.id AND t.user_id=u.id AND t.status='submitted')) AS pending
+       FROM users u WHERE u.id=$1`, [userId]),
+  ]);
   if (!u) fail(404, 'Không tìm thấy học sinh');
-  const attempts = await q(`SELECT id, kind, title, score, max_score, percent, needs_grading, submitted_at, duration_sec
-                            FROM attempts WHERE user_id=$1 AND status='submitted' ORDER BY submitted_at`, [userId]);
-  const topics = await q(`SELECT topic, sum(earned)::float AS earned, sum(max)::float AS max, count(*)::int AS n,
-                            sum(CASE WHEN correct THEN 1 ELSE 0 END)::int AS right_n
-                          FROM attempt_items WHERE user_id=$1 AND NOT pending GROUP BY topic`, [userId]);
-  const recentTopics = await q(`SELECT topic, sum(earned)::float AS earned, sum(max)::float AS max FROM attempt_items
-                                WHERE user_id=$1 AND NOT pending AND submitted_at > now() - interval '30 days' GROUP BY topic`, [userId]);
-  const classAvg = u.class_id ? await one(`SELECT round(avg(percent),1)::float AS avg FROM attempts WHERE class_id=$1 AND status='submitted' AND kind='assignment'`, [u.class_id]) : null;
-  const pendingAssignments = u.class_id ? (await one(`SELECT count(*)::int AS n FROM assignments a WHERE a.class_id=$1 AND a.status='published'
-      AND (a.due_at IS NULL OR a.due_at > now()) AND (a.opens_at IS NULL OR a.opens_at <= now())
-      AND NOT EXISTS (SELECT 1 FROM attempts t WHERE t.assignment_id=a.id AND t.user_id=$2 AND t.status='submitted')`, [u.class_id, userId])).n : 0;
-  return { student: u, attempts, topics, recentTopics, classAvg: classAvg?.avg ?? null, pendingAssignments };
+  return { student: u, attempts, topics, recentTopics, classAvg: extra?.class_avg ?? null, pendingAssignments: extra?.pending ?? 0 };
 }
 route('GET', '/dashboard/student/:id', 'staff', async ({ params }) => studentStats(params.id));
 
 // ================================================================ XUẤT CSV
 route('GET', '/export/class/:id', 'staff', async ({ params }) => {
-  const cls = await one('SELECT * FROM classes WHERE id=$1', [params.id]);
+  const cid = int(params.id);
+  const [cls, assigns, students, best] = await Promise.all([
+    one('SELECT * FROM classes WHERE id=$1', [cid]),
+    q(`SELECT a.id, COALESCE(a.title,e.title) AS title FROM assignments a JOIN exams e ON e.id=a.exam_id WHERE a.class_id=$1 ORDER BY a.created_at`, [cid]),
+    q(`SELECT id, full_name, username FROM users WHERE class_id=$1 AND role='student' ORDER BY full_name`, [cid]),
+    q(`SELECT t.user_id, t.assignment_id, max(t.percent)::float AS best FROM attempts t JOIN assignments a ON a.id=t.assignment_id
+       WHERE a.class_id=$1 AND t.status='submitted' GROUP BY t.user_id, t.assignment_id`, [cid]),
+  ]);
   if (!cls) fail(404, 'Không tìm thấy lớp');
-  const assigns = await q(`SELECT a.id, COALESCE(a.title,e.title) AS title FROM assignments a JOIN exams e ON e.id=a.exam_id WHERE a.class_id=$1 ORDER BY a.created_at`, [cls.id]);
-  const students = await q(`SELECT id, full_name, username FROM users WHERE class_id=$1 AND role='student' ORDER BY full_name`, [cls.id]);
-  const best = await q(`SELECT t.user_id, t.assignment_id, max(t.percent)::float AS best FROM attempts t JOIN assignments a ON a.id=t.assignment_id
-                        WHERE a.class_id=$1 AND t.status='submitted' GROUP BY t.user_id, t.assignment_id`, [cls.id]);
   const map = new Map(best.map((b) => [`${b.user_id}-${b.assignment_id}`, b.best]));
   const esc = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`;
   const rows = [['STT', 'Họ tên', 'Tên đăng nhập', ...assigns.map((a) => a.title + ' (%)'), 'Trung bình (%)']];

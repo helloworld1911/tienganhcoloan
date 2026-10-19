@@ -1,10 +1,20 @@
 // Điểm vào ứng dụng: định tuyến, khung giao diện, đăng nhập
 import { session, get, post, del } from './api.js';
 import { esc, toast, formData, modal, googleButton, $ } from './ui.js';
-import * as admin from './admin.js';
-import * as editor from './editor.js';
-import * as student from './student.js';
-import * as examView from './exam-view.js';
+// Các trang được tải khi cần (học sinh không phải tải phần quản trị và ngược lại)
+const mods = {
+  admin: () => import('./admin.js'),
+  editor: () => import('./editor.js'),
+  student: () => import('./student.js'),
+  examView: () => import('./exam-view.js'),
+};
+const lazy = (m, name) => async (params) => (await mods[m]())[name](params);
+/** Tải sẵn các trang của vai trò hiện tại khi trình duyệt rảnh */
+function prefetch() {
+  const list = state.user?.role === 'student' ? ['student', 'examView'] : ['admin', 'editor', 'examView'];
+  const run = () => list.forEach((m) => mods[m]().catch(() => {}));
+  (window.requestIdleCallback || ((f) => setTimeout(f, 800)))(run);
+}
 
 export const state = { user: null, cls: null, pending: 0 };
 const app = document.getElementById('app');
@@ -15,28 +25,28 @@ const ROUTES = [
   ['/register', null, registerView],
   ['/setup', null, setupView],
   // học sinh
-  ['/home', 'student', student.home],
-  ['/assignments', 'student', student.assignments],
-  ['/do/:id', 'student', examView.take],
-  ['/practice', 'student', student.practice],
-  ['/practice/do/:id', 'student', examView.takePractice],
-  ['/result/:id', 'auth', examView.result],
-  ['/history', 'student', student.history],
+  ['/home', 'student', lazy('student', 'home')],
+  ['/assignments', 'student', lazy('student', 'assignments')],
+  ['/do/:id', 'student', lazy('examView', 'take')],
+  ['/practice', 'student', lazy('student', 'practice')],
+  ['/practice/do/:id', 'student', lazy('examView', 'takePractice')],
+  ['/result/:id', 'auth', lazy('examView', 'result')],
+  ['/history', 'student', lazy('student', 'history')],
   ['/account', 'auth', accountView],
   // giáo viên / quản trị
-  ['/admin', 'staff', admin.dashboard],
-  ['/admin/classes', 'staff', admin.classes],
-  ['/admin/class/:id', 'staff', admin.classDetail],
-  ['/admin/student/:id', 'staff', admin.studentDetail],
-  ['/admin/exams', 'staff', editor.examList],
-  ['/admin/exams/new', 'staff', editor.uploadView],
-  ['/admin/exam/:id', 'staff', editor.editExam],
-  ['/admin/exam/:id/preview', 'staff', examView.preview],
-  ['/admin/assignments', 'staff', editor.assignmentList],
-  ['/admin/assignment/:id', 'staff', admin.assignmentResults],
-  ['/admin/grading', 'staff', admin.grading],
-  ['/admin/attempt/:id', 'staff', examView.result],
-  ['/admin/users', 'staff', admin.users],
+  ['/admin', 'staff', lazy('admin', 'dashboard')],
+  ['/admin/classes', 'staff', lazy('admin', 'classes')],
+  ['/admin/class/:id', 'staff', lazy('admin', 'classDetail')],
+  ['/admin/student/:id', 'staff', lazy('admin', 'studentDetail')],
+  ['/admin/exams', 'staff', lazy('editor', 'examList')],
+  ['/admin/exams/new', 'staff', lazy('editor', 'uploadView')],
+  ['/admin/exam/:id', 'staff', lazy('editor', 'editExam')],
+  ['/admin/exam/:id/preview', 'staff', lazy('examView', 'preview')],
+  ['/admin/assignments', 'staff', lazy('editor', 'assignmentList')],
+  ['/admin/assignment/:id', 'staff', lazy('admin', 'assignmentResults')],
+  ['/admin/grading', 'staff', lazy('admin', 'grading')],
+  ['/admin/attempt/:id', 'staff', lazy('examView', 'result')],
+  ['/admin/users', 'staff', lazy('admin', 'users')],
 ];
 
 const NAV = {
@@ -87,7 +97,7 @@ async function route() {
   const hash = location.hash.replace(/^#/, '').split('?')[0] || '/';
   const s = session.get();
   if (s && !state.user) {
-    try { const me = await get('/me'); state.user = me.user; state.cls = me.class; } catch { session.clear(); }
+    try { const me = await get('/me'); state.user = me.user; state.cls = me.class; prefetch(); } catch { session.clear(); }
   }
   if (hash === '/' || hash === '') { location.hash = state.user ? (isStaff() ? '#/admin' : '#/home') : '#/login'; return; }
   for (const [pattern, role, view] of ROUTES) {

@@ -170,11 +170,21 @@ function runExam(data, backHash) {
     try { await put(`/attempts/${data.attemptId}/save`, { answers }); $('#saveSt', main).textContent = 'Đã lưu'; }
     catch { $('#saveSt', main).textContent = 'Chưa lưu được (sẽ thử lại)'; }
   }, 2500);
+  // Lưu nháp vào trình duyệt: gom lại, không ghi mỗi lần gõ phím
+  const saveLocal = debounce(() => { try { localStorage.setItem(key, JSON.stringify(answers)); } catch {} }, 400);
+  const filled = (v) => String(v ?? '').trim() !== '';
+  let doneCount = Object.values(answers).filter(filled).length;
+  const saveSt = $('#saveSt', main), cnt = $('#cnt', main);
   const onChange = (qid, val) => {
+    const was = filled(answers[qid]), now = filled(val);
     answers[qid] = val;
-    try { localStorage.setItem(key, JSON.stringify(answers)); } catch {}
-    $('#saveSt', main).textContent = 'Đang lưu…';
-    updateNav();
+    saveLocal();
+    if (saveSt.textContent !== 'Đang lưu…') saveSt.textContent = 'Đang lưu…';
+    // chỉ cập nhật đúng ô của câu vừa làm trên bản đồ câu hỏi
+    if (was !== now) {
+      doneCount += now ? 1 : -1; cnt.textContent = doneCount;
+      main.querySelector(`#nav [data-goto="${CSS.escape(qid)}"]`)?.classList.toggle('done', now);
+    }
     saveServer();
   };
   paper.addEventListener('change', (e) => {
@@ -200,6 +210,7 @@ function runExam(data, backHash) {
     }
     submitted = true;
     saveServer.cancel();
+    try { localStorage.setItem(key, JSON.stringify(answers)); } catch {}
     const btn = $('#submitBtn', main); btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Đang chấm…';
     try {
       await post(`/attempts/${data.attemptId}/submit`, { answers });
@@ -229,9 +240,9 @@ function runExam(data, backHash) {
     tick();
     timerId = setInterval(tick, 1000);
   }
-  const beforeUnload = (e) => { if (!submitted) { e.preventDefault(); e.returnValue = ''; } };
+  const beforeUnload = (e) => { if (!submitted) { try { localStorage.setItem(key, JSON.stringify(answers)); } catch {} e.preventDefault(); e.returnValue = ''; } };
   window.addEventListener('beforeunload', beforeUnload);
-  const cleanup = () => { saveServer.cancel(); clearInterval(timerId); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('hashchange', cleanup); };
+  const cleanup = () => { saveServer.cancel(); saveLocal.cancel?.(); clearInterval(timerId); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('hashchange', cleanup); };
   window.addEventListener('hashchange', cleanup);
 }
 

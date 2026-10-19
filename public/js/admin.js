@@ -1,5 +1,5 @@
 // Giao diện giáo viên / quản trị: dashboard, lớp, học sinh, kết quả
-import { get, post, put, del, api } from './api.js';
+import { get, post, put, del, api, session } from './api.js';
 import { layout, state } from './app.js';
 import { esc, toast, modal, confirmBox, formData, fmtDate, fmtAgo, pct, bar, topicLabel, topicRows, chart, heatColor, score10, COLORS, $, $$ } from './ui.js';
 import { TOPICS } from './parser.js';
@@ -28,7 +28,20 @@ export async function dashboard() {
     </div>
     ${!d.classes.length ? '<div class="hint mb">Bắt đầu: 1) tạo lớp & thêm học sinh → 2) tải đề + đáp án lên → 3) giao bài cho lớp.</div>' : ''}
     <div class="seg mb" id="gsel"><button class="on" data-g="all">Tất cả khối</button>${grades.map((g) => `<button data-g="${g ?? ''}">${gradeName(g)}</button>`).join('')}</div>
-    <div id="body"></div>`);
+    <div id="body"></div>
+    <div class="card mt flat small" id="health"><span class="muted">⚡ Đang đo tốc độ hệ thống…</span></div>`);
+  // đo tốc độ máy chủ ↔ CSDL (không chặn việc hiển thị trang)
+  get('/health').then((h) => {
+    const el = $('#health', main); if (!el) return;
+    const slow = h.dbMs > 60;
+    el.innerHTML = `<b>⚡ Tốc độ hệ thống:</b> mỗi truy vấn tới CSDL mất <b class="${slow ? 'pct lo' : 'pct hi'}">${h.dbMs} ms</b>
+      · máy chủ Netlify ở vùng <b>${esc(h.region || '?')}</b> · kết nối ${h.driver === 'neon-http' ? 'HTTP (nhanh)' : esc(h.driver)}
+      ${slow ? `<div class="warnbox mt-s">CSDL đang đặt xa máy chủ Netlify nên mỗi trang chậm thêm khoảng ${Math.round(h.dbMs * 4 / 100) / 10}s.
+        Nên tạo CSDL Neon mới ở vùng <b>AWS US East 2 (Ohio)</b> – cùng vùng với máy chủ Netlify gói miễn phí – rồi dùng nút
+        <b>Sao lưu / Khôi phục</b> bên dưới để chuyển dữ liệu (xem README, mục “Tăng tốc”).</div>` : ''}
+      ${state.user.role === 'admin' ? '<div class="row mt-s"><button class="btn ghost sm" id="bk">⬇️ Sao lưu dữ liệu</button><button class="btn ghost sm" id="rs">⬆️ Khôi phục từ file sao lưu</button><input type="file" id="rsf" accept=".json" hidden></div>' : ''}`;
+    if (state.user.role === 'admin') bindBackup(el);
+  }).catch(() => { const el = $('#health', main); if (el) el.remove(); });
   const draw = () => {
     const cls = d.classes.filter((c) => sel === 'all' || String(c.grade ?? '') === sel);
     const gradeKey = (g) => String(g ?? '');
@@ -65,6 +78,53 @@ export async function dashboard() {
     const b = e.target.closest('button'); if (!b) return;
     sel = b.dataset.g; $$('#gsel button', main).forEach((x) => x.classList.toggle('on', x === b)); draw();
   });
+}
+
+// ================================================================ SAO LƯU / KHÔI PHỤC
+const BACKUP_TABLES = ['classes', 'users', 'exams', 'assignments', 'attempts', 'attempt_items', 'media'];
+function bindBackup(el) {
+  el.querySelector('#bk').onclick = async (ev) => {
+    const btn = ev.currentTarget; btn.disabled = true;
+    try {
+      const tables = {};
+      for (const t of BACKUP_TABLES) {
+        tables[t] = [];
+        let offset = 0;
+        while (offset != null) {
+          btn.textContent = `Đang sao lưu ${t} (${tables[t].length})…`;
+          const r = await get(`/admin/backup/${t}?offset=${offset}`);
+          tables[t].push(...r.rows); offset = r.next;
+        }
+      }
+      const blob = new Blob([JSON.stringify({ app: 'engpractice', version: 1, created: new Date().toISOString(), tables })], { type: 'application/json' });
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = `sao-luu-${new Date().toISOString().slice(0, 10)}.json`; a.click();
+      toast('Đã tải file sao lưu', 'ok');
+    } catch (e) { toast(e.message, 'err'); } finally { btn.disabled = false; btn.textContent = '⬇️ Sao lưu dữ liệu'; }
+  };
+  el.querySelector('#rs').onclick = () => el.querySelector('#rsf').click();
+  el.querySelector('#rsf').onchange = async (e) => {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+    let data;
+    try { data = JSON.parse(await f.text()); if (data.app !== 'engpractice' || !data.tables) throw new Error(); } catch { toast('File sao lưu không hợp lệ', 'err'); return; }
+    if (!(await confirmBox('Khôi phục sẽ <b>XOÁ toàn bộ dữ liệu hiện tại</b> (lớp, học sinh, đề, bài làm) và thay bằng dữ liệu trong file sao lưu. Tiếp tục?', { danger: true, ok: 'Khôi phục' }))) return;
+    const btn = el.querySelector('#rs'); btn.disabled = true;
+    try {
+      const { restoreToken } = await post('/admin/restore/begin', { confirm: 'XOA_HET' });
+      session.set({ token: restoreToken }); // tài khoản hiện tại bị xoá tạm trong lúc khôi phục
+      let total = 0;
+      for (const t of BACKUP_TABLES) {
+        const rows = data.tables[t] || [];
+        let chunk = [], size = 0;
+        const flush = async () => { if (!chunk.length) return; total += (await post(`/admin/restore/rows/${t}`, { rows: chunk })).inserted; chunk = []; size = 0; btn.textContent = `Đang khôi phục ${t}… (${total})`; };
+        for (const r of rows) { const n = JSON.stringify(r).length; if (size + n > 2_000_000) await flush(); chunk.push(r); size += n; }
+        await flush();
+      }
+      await post('/admin/restore/finish');
+      toast(`Đã khôi phục ${total} dòng dữ liệu. Hãy đăng nhập lại.`, 'ok');
+      setTimeout(() => { try { localStorage.clear(); } catch {} location.hash = '#/login'; location.reload(); }, 1500);
+    } catch (err) { toast(err.message, 'err'); btn.disabled = false; btn.textContent = '⬆️ Khôi phục từ file sao lưu'; }
+  };
 }
 
 // ================================================================ LỚP

@@ -8,14 +8,17 @@
     "local": "node scripts/local-server.mjs",
     "dev": "netlify dev",
     "test": "node test/parser.test.mjs && node test/api.test.mjs",
-    "test:real": "node test/real.test.mjs"
+    "test:real": "node test/real.test.mjs",
+    "build": "node scripts/build.mjs"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.2.0",
     "@netlify/blobs": "^11.1.4",
     "@netlify/database": "^2.0.1"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.3.0",
+    "esbuild": "^0.24.2",
     "mammoth": "^1.8.0",
     "pdfjs-dist": "^4.10.38"
   },

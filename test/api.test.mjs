@@ -158,6 +158,26 @@ await call('POST', '/me/google', { credential: 'tok' }, admin.token);
 ok((await call('POST', '/auth/google', { credential: 'tok' }, null)).user.role === 'admin', 'giáo viên liên kết Gmail rồi đăng nhập bằng Google');
 globalThis.fetch = realFetch;
 
+// 6f. Tốc độ + sao lưu / khôi phục
+token = admin.token;
+const h = await call('GET', '/health');
+ok(typeof h.dbMs === 'number', 'đo tốc độ CSDL: ' + h.dbMs + 'ms, driver ' + h.driver);
+const dump = {};
+for (const tb of ['classes', 'users', 'exams', 'assignments', 'attempts', 'attempt_items', 'media']) {
+  dump[tb] = []; let off = 0;
+  while (off != null) { const r = await call('GET', `/admin/backup/${tb}?offset=${off}`); dump[tb].push(...r.rows); off = r.next; }
+}
+const before = Object.fromEntries(Object.entries(dump).map(([k, v]) => [k, v.length]));
+token = (await call('POST', '/admin/restore/begin', { confirm: 'XOA_HET' })).restoreToken;
+for (const [tb, rows] of Object.entries(dump)) if (rows.length) await call('POST', `/admin/restore/rows/${tb}`, { rows });
+await call('POST', '/admin/restore/finish');
+let blocked = false; try { await call('GET', '/classes'); } catch { blocked = true; }
+ok(blocked, 'mã khôi phục tạm thời không dùng được cho việc khác');
+token = admin.token;
+const ov2 = await call('GET', '/dashboard/overview');
+const newCls = await call('POST', '/classes', { name: '7A', grade: 7 });
+ok(ov2.totals.submissions === dump.attempts.filter((a) => a.status === 'submitted').length && ov2.classes.length === dump.classes.length && newCls.id > Math.max(...dump.classes.map((c) => c.id)), 'sao lưu → khôi phục giữ nguyên dữ liệu, id tiếp tục đúng: ' + JSON.stringify(before));
+
 // 7. Phân quyền
 let denied = false;
 try { await call('GET', '/classes', null, an.token); } catch { denied = true; }

@@ -69,7 +69,7 @@ Chạy kiểm thử: `npm test`. Thử với đề thật của bạn: `npm run 
 
 ### Bước 1 – Tạo database Postgres miễn phí trên Neon
 1. Vào https://neon.tech → **Sign up** (đăng nhập bằng Google/GitHub).
-2. **Create project**: tên `engweb`, Postgres bản mới nhất, **Region: AWS Asia Pacific (Singapore)** (gần Việt Nam/Hàn Quốc nhất).
+2. **Create project**: tên `engweb`, Postgres bản mới nhất, **Region: AWS US East 2 (Ohio)** – cùng vùng với máy chủ Netlify gói miễn phí (xem mục *Tăng tốc*).
 3. Ở trang **Dashboard → Connect**: bật **Connection pooling**, chọn dạng *Connection string*, bấm **Copy**. Chuỗi có dạng
    `postgresql://user:mật-khẩu@ep-xxxx-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require`
    (giữ bí mật chuỗi này). **Không cần tạo bảng** – web tự tạo ở lần chạy đầu.
@@ -110,6 +110,16 @@ Mở địa chỉ `https://<tên-site>.netlify.app` → màn hình **Thiết l�
 - **Netlify Database** (Postgres có sẵn của Netlify, chỉ có ở một số gói): nếu project của bạn đã bật, Netlify tự đặt `NETLIFY_DB_URL` và web dùng luôn – không cần `DATABASE_URL`.
 - **Supabase**: tạo project → *Connect* → copy chuỗi “Transaction pooler” → đặt vào `DATABASE_URL`.
 - **Netlify CLI**: `npm i -g netlify-cli && netlify login && netlify init && netlify env:set DATABASE_URL "<chuỗi>" && netlify env:set JWT_SECRET "<chuỗi>" && netlify deploy --prod`.
+
+### Tăng tốc: đặt CSDL cùng vùng với máy chủ Netlify
+Gói miễn phí của Netlify chạy máy chủ ở **Mỹ (US East – Ohio)** và không đổi được vùng (gói Pro mới chọn được Singapore). Nếu CSDL Neon đặt ở Singapore, mỗi truy vấn phải đi vòng Mỹ ↔ Singapore (~200ms). Ô **⚡ Tốc độ hệ thống** ở trang Tổng quan cho biết con số này – nếu trên ~60ms, nên chuyển:
+1. Đăng nhập web bằng quản trị viên → Tổng quan → **⬇️ Sao lưu dữ liệu** (tải về file `.json`).
+2. Trên Neon: **New project** → Region **AWS US East 2 (Ohio)** → copy chuỗi kết nối (bật *Connection pooling*).
+3. Netlify → Environment variables → sửa `DATABASE_URL` thành chuỗi mới → **Trigger deploy**.
+4. Mở web → **Thiết lập lần đầu** (tạo tạm 1 tài khoản quản trị) → Tổng quan → **⬆️ Khôi phục từ file sao lưu** → chọn file ở bước 1 → đăng nhập lại bằng tài khoản cũ.
+   (File nghe đã tải lên nằm ở Netlify nên không bị ảnh hưởng.)
+
+Đo tốc độ trên máy: `node test/bench.mjs . setup /tmp/bench && node test/bench.mjs . run /tmp/bench` (giả lập độ trễ CSDL 200ms).
 
 ### Lỗi thường gặp
 | Hiện tượng | Cách xử lý |

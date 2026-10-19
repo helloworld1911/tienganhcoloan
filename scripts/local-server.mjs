@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const PORT = +process.env.PORT || 8888;
-const root = path.resolve(new URL('../public', import.meta.url).pathname);
+const root = path.resolve(process.env.STATIC_DIR || new URL('../public', import.meta.url).pathname); // STATIC_DIR=dist để thử bản đóng gói
 
 if (!process.env.DATABASE_URL && !process.env.NETLIFY_DB_URL) {
   const { PGlite } = await import('@electric-sql/pglite');

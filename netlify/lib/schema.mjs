@@ -1,4 +1,7 @@
 // Lược đồ CSDL – được tạo tự động ở lần gọi API đầu tiên (CREATE ... IF NOT EXISTS)
+// Tăng số này mỗi khi sửa lược đồ bên dưới (để máy chủ tự cập nhật bảng một lần)
+export const SCHEMA_VERSION = '3';
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS classes (
   id SERIAL PRIMARY KEY,

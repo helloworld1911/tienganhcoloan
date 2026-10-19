@@ -80,8 +80,18 @@ export function formData(form) {
 
 /** Biểu đồ Chart.js – tự huỷ biểu đồ cũ trên cùng canvas */
 const charts = new WeakMap();
-export function chart(canvas, config) {
-  if (!canvas || !window.Chart) return;
+let chartLib = null;
+const loadChart = () => (chartLib ??= new Promise((res, rej) => {
+  if (window.Chart) return res(window.Chart);
+  const sc = document.createElement('script'); sc.src = '/vendor/chart.umd.min.js';
+  sc.onload = () => res(window.Chart); sc.onerror = () => { chartLib = null; rej(new Error('chart')); };
+  document.head.appendChild(sc);
+}));
+/** Biểu đồ: thư viện Chart.js chỉ được tải khi trang thật sự có biểu đồ */
+export async function chart(canvas, config) {
+  if (!canvas) return;
+  try { await loadChart(); } catch { return; }
+  if (!canvas.isConnected) return;
   charts.get(canvas)?.destroy();
   window.Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
   window.Chart.defaults.color = '#6b7591';

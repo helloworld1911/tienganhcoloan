@@ -1,7 +1,7 @@
-# Cấu hình Netlify – không cần bước build, chỉ cài thư viện cho Functions
+# Cấu hình Netlify – đóng gói giao diện (gộp + nén JS/CSS) rồi đăng thư mục dist
 [build]
-  publish = "public"
-  command = "echo 'Không cần build'"
+  publish = "dist"
+  command = "npm run build"
 
 [build.environment]
   NODE_VERSION = "22"
@@ -10,11 +10,22 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
-# Bộ đệm cho thư viện tĩnh
+# File đã đóng gói có mã băm trong tên → cho trình duyệt nhớ 1 năm
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
 [[headers]]
   for = "/vendor/*"
   [headers.values]
     Cache-Control = "public, max-age=31536000, immutable"
+
+# Trang chính luôn lấy bản mới nhất (để cập nhật ngay sau mỗi lần deploy)
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
 
 [[headers]]
   for = "/*"
