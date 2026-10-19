@@ -38,8 +38,17 @@ const bulk = await call('POST', '/users', { users: [
   { fullName: 'Lê Chi', username: 'an6a', password: '123456', classId: c6a.id },
 ] });
 ok(bulk.created.length === 2 && bulk.errors.length === 1, 'nhập danh sách: 2 tạo mới, 1 trùng tên');
-const reg = await call('POST', '/auth/register', { fullName: 'Phạm Dũng', username: 'dung6b', password: '123456', joinCode: c6b.join_code });
-ok(reg.user.classId === c6b.id, 'học sinh tự đăng ký bằng mã lớp');
+const refused = async (fn) => { try { await fn(); return false; } catch (e) { return / 40[0-4] /.test(e.message); } };
+ok(await refused(() => call('POST', '/auth/register', { fullName: 'X', username: 'tudangky', password: '123456', joinCode: c6b.join_code }, null)), 'không ai tự đăng ký được');
+const reg = await call('POST', '/users/register', { fullName: 'Phạm Dũng', username: 'dung6b', password: '123456', joinCode: c6b.join_code, email: 'dung@gmail.com' });
+ok(reg.user.class_id === c6b.id && reg.class.name === '6B', 'quản trị viên đăng ký học sinh bằng mã lớp');
+ok(await refused(() => call('POST', '/users/register', { fullName: 'Y', username: 'yy6b', password: '123456', joinCode: 'SAIMA' })), 'mã lớp sai bị từ chối');
+await call('POST', '/users', { users: [{ fullName: 'Cô Hoa', username: 'cohoa', password: '123456', role: 'teacher' }] });
+const tTok = (await call('POST', '/auth/login', { username: 'cohoa', password: '123456' }, null)).token;
+const sTok = (await call('POST', '/auth/login', { username: 'dung6b', password: '123456' }, null)).token;
+ok(await refused(() => call('POST', '/users', { users: [{ fullName: 'Z', username: 'zz6a', password: '123456', classId: c6a.id }] }, tTok))
+  && await refused(() => call('POST', '/users/register', { fullName: 'Z', username: 'zz6a', password: '123456', joinCode: c6a.join_code }, tTok))
+  && await refused(() => call('POST', '/users/register', { fullName: 'Z', username: 'zz6a', password: '123456', joinCode: c6a.join_code }, sTok)), 'chỉ quản trị viên tạo được tài khoản');
 
 // 3. Phân tích đề + lưu
 const opt = { styleMap: ['u => u'] };
@@ -175,13 +184,9 @@ globalThis.fetch = async (url, o) => String(url).startsWith('https://oauth2.goog
 const gl = await call('POST', '/auth/google', { credential: 'tok' }, null);
 ok(gl.user.id === an.user.id, 'đăng nhập Google bằng Gmail giáo viên đã gán cho học sinh');
 gUser = { email: 'moi.hocsinh@gmail.com', sub: 'g-222', name: 'Học Sinh Mới' };
-let need = null;
-try { await call('POST', '/auth/google', { credential: 'tok' }, null); } catch (e) { need = e.message; }
-ok(/needsRegister/.test(need || ''), 'Gmail lạ: yêu cầu nhập mã lớp');
-const gr = await call('POST', '/auth/google', { credential: 'tok', joinCode: c6a.join_code, fullName: 'Học Sinh Mới' }, null);
-ok(gr.user.classId === c6a.id && gr.user.username === 'moi.hocsinh' && !gr.user.passwordSet, 'tạo tài khoản học sinh bằng Google + mã lớp');
-await call('POST', '/me/password', { newPassword: 'abcdef' }, gr.token);
-ok((await call('POST', '/auth/login', { username: 'moi.hocsinh', password: 'abcdef' }, null)).token, 'học sinh Google đặt mật khẩu và đăng nhập thường được');
+ok(await refused(() => call('POST', '/auth/google', { credential: 'tok', joinCode: c6a.join_code, fullName: 'Học Sinh Mới' }, null)), 'Gmail lạ không tự tạo được tài khoản');
+gUser = { email: 'dung@gmail.com', sub: 'g-444', name: 'Dũng' };
+ok((await call('POST', '/auth/google', { credential: 'tok' }, null)).user.username === 'dung6b', 'Gmail quản trị viên gắn khi đăng ký → đăng nhập Google được');
 gUser = { email: 'cogiao@gmail.com', sub: 'g-333', name: 'Cô Lan' };
 await call('POST', '/me/google', { credential: 'tok' }, admin.token);
 ok((await call('POST', '/auth/google', { credential: 'tok' }, null)).user.role === 'admin', 'giáo viên liên kết Gmail rồi đăng nhập bằng Google');

@@ -106,15 +106,8 @@ route('POST', '/auth/login', null, async ({ body }) => {
   await q('UPDATE users SET last_login=now() WHERE id=$1', [u.id]);
   return login(u);
 });
-route('POST', '/auth/register', null, async ({ body }) => {
-  const cls = await one('SELECT * FROM classes WHERE upper(join_code)=upper($1)', [clean(body.joinCode, 20)]);
-  if (!cls) fail(400, 'Mã lớp không đúng. Em hỏi cô Loan mã lớp nhé.');
-  checkCreds(body.username, body.password);
-  if (!clean(body.fullName)) fail(400, 'Vui lòng nhập họ tên');
-  const u = await one('INSERT INTO users(username,password_hash,full_name,role,class_id) VALUES($1,$2,$3,$4,$5) RETURNING *',
-    [body.username.toLowerCase(), hashPassword(body.password), clean(body.fullName), 'student', cls.id]);
-  return login(u);
-});
+// Học sinh không tự đăng ký được nữa: chỉ quản trị viên tạo tài khoản (xem POST /users và /users/register).
+route('POST', '/auth/register', null, async () => fail(403, 'Không thể tự đăng ký. Em nhờ cô Loan tạo tài khoản nhé.'));
 route('GET', '/me', 'auth', async ({ user }) => {
   const cls = user.class_id ? await one('SELECT id,name,grade FROM classes WHERE id=$1', [user.class_id]) : null;
   return { user: publicUser(user), class: cls };
@@ -142,16 +135,7 @@ async function verifyGoogle(credential) {
   if (t.email_verified !== 'true' && t.email_verified !== true) fail(401, 'Email Google chưa được xác minh');
   return { sub: t.sub, email: String(t.email).toLowerCase(), name: t.name || t.email.split('@')[0] };
 }
-async function uniqueUsername(base) {
-  let u = base.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/^[._-]+/, '').slice(0, 30) || 'hocsinh';
-  if (u.length < 3) u = u + 'hs';
-  for (let i = 0; i < 50; i++) {
-    const cand = i ? `${u}${i + 1}` : u;
-    if (!(await one('SELECT 1 FROM users WHERE username=$1', [cand]))) return cand;
-  }
-  return u + crypto.randomBytes(3).toString('hex');
-}
-/** Đăng nhập bằng Google. Nếu chưa có tài khoản: cần mã lớp để tạo tài khoản học sinh. */
+/** Đăng nhập bằng Google – chỉ cho tài khoản đã có (đã liên kết Gmail, hoặc được quản trị viên gắn sẵn Gmail). */
 route('POST', '/auth/google', null, async ({ body }) => {
   const g = await verifyGoogle(body.credential);
   let u = await one('SELECT * FROM users WHERE google_sub=$1', [g.sub]);
@@ -159,15 +143,7 @@ route('POST', '/auth/google', null, async ({ body }) => {
     u = await one('SELECT * FROM users WHERE lower(email)=$1 AND google_sub IS NULL', [g.email]);
     if (u) await q('UPDATE users SET google_sub=$1 WHERE id=$2', [g.sub, u.id]);
   }
-  if (!u) {
-    if (!body.joinCode) return json({ needsRegister: true, email: g.email, name: g.name }, 404);
-    const cls = await one('SELECT * FROM classes WHERE upper(join_code)=upper($1)', [clean(body.joinCode, 20)]);
-    if (!cls) fail(400, 'Mã lớp không đúng. Em hỏi cô Loan mã lớp nhé.');
-    const username = await uniqueUsername(g.email.split('@')[0]);
-    u = await one(`INSERT INTO users(username,password_hash,full_name,role,class_id,email,google_sub,password_set)
-                   VALUES($1,$2,$3,'student',$4,$5,$6,false) RETURNING *`,
-    [username, hashPassword(crypto.randomBytes(24).toString('hex')), clean(body.fullName) || g.name, cls.id, g.email, g.sub]);
-  }
+  if (!u) fail(404, `Gmail ${g.email} chưa có tài khoản. Em nhờ cô Loan tạo tài khoản (và gắn Gmail này) nhé.`);
   if (!u.active) fail(403, 'Tài khoản đã bị khoá');
   await q('UPDATE users SET last_login=now() WHERE id=$1', [u.id]);
   return login(u);
@@ -361,14 +337,13 @@ route('GET', '/users', 'staff', async ({ query }) => {
             ORDER BY c.name NULLS FIRST, u.full_name LIMIT 2000`, args);
 });
 /** body: { users:[{fullName, username, password, classId, role}] } – tạo 1 hoặc nhiều tài khoản */
-route('POST', '/users', 'staff', async ({ body, user }) => {
+route('POST', '/users', 'admin', async ({ body }) => {
   const list = Array.isArray(body.users) ? body.users : [body];
   if (!list.length || list.length > 500) fail(400, 'Danh sách không hợp lệ (tối đa 500)');
   const created = [], errors = [];
   for (const [i, it] of list.entries()) {
     try {
       const role = it.role === 'teacher' || it.role === 'admin' ? it.role : 'student';
-      if (role !== 'student' && user.role !== 'admin') fail(403, 'Chỉ quản trị viên được tạo tài khoản giáo viên');
       checkCreds(it.username, it.password);
       if (!clean(it.fullName)) fail(400, 'Thiếu họ tên');
       const email = clean(it.email, 120).toLowerCase() || null;
@@ -381,6 +356,18 @@ route('POST', '/users', 'staff', async ({ body, user }) => {
     }
   }
   return { created, errors };
+});
+/** Quản trị viên đăng ký học sinh bằng mã lớp: { joinCode, fullName, username, password, email? } */
+route('POST', '/users/register', 'admin', async ({ body }) => {
+  const cls = await one('SELECT * FROM classes WHERE upper(join_code)=upper($1)', [clean(body.joinCode, 20)]);
+  if (!cls) fail(400, 'Mã lớp không đúng');
+  checkCreds(body.username, body.password);
+  if (!clean(body.fullName)) fail(400, 'Vui lòng nhập họ tên');
+  const email = clean(body.email, 120).toLowerCase() || null;
+  if (email && !/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(email)) fail(400, 'Email không hợp lệ');
+  const u = await one('INSERT INTO users(username,password_hash,full_name,role,class_id,email) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,username,full_name,role,class_id,email',
+    [body.username.toLowerCase().trim(), hashPassword(body.password), clean(body.fullName), 'student', cls.id, email]);
+  return { user: u, class: { id: cls.id, name: cls.name, grade: cls.grade } };
 });
 route('PUT', '/users/:id', 'staff', async ({ params, body, user }) => {
   const target = await one('SELECT * FROM users WHERE id=$1', [params.id]);

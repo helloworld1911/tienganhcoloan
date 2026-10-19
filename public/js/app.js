@@ -22,7 +22,7 @@ const app = document.getElementById('app');
 const ROUTES = [
   // công khai
   ['/login', null, loginView],
-  ['/register', null, registerView],
+  ['/register', null, () => { location.hash = '#/login'; }],
   ['/setup', null, setupView],
   // học sinh
   ['/home', 'student', lazy('student', 'home')],
@@ -47,6 +47,7 @@ const ROUTES = [
   ['/admin/grading', 'staff', lazy('admin', 'grading')],
   ['/admin/attempt/:id', 'staff', lazy('examView', 'result')],
   ['/admin/users', 'staff', lazy('admin', 'users')],
+  ['/admin/register', 'admin', lazy('admin', 'registerStudent')],
 ];
 
 const NAV = {
@@ -57,6 +58,7 @@ const NAV = {
     ['#/admin/assignments', '📮', 'Bài đã giao'],
     ['#/admin/grading', '✍️', 'Chấm tự luận', 'pending'],
     ['#/admin/users', '👥', 'Tài khoản'],
+    ['#/admin/register', '➕', 'Đăng ký học sinh', null, 'admin'],
   ],
   student: [
     ['#/home', '🏠', 'Trang của em'],
@@ -69,7 +71,7 @@ const NAV = {
 const isStaff = () => state.user && (state.user.role === 'admin' || state.user.role === 'teacher');
 
 export function layout(html) {
-  const nav = NAV[isStaff() ? 'staff' : 'student'];
+  const nav = NAV[isStaff() ? 'staff' : 'student'].filter((n) => !n[4] || state.user.role === n[4]);
   const here = location.hash.split('?')[0];
   const active = (href) => here === href || (href !== '#/admin' && href !== '#/home' && here.startsWith(href));
   app.innerHTML = `
@@ -107,6 +109,7 @@ async function route() {
     if (!m) continue;
     if (role && !state.user) { location.hash = '#/login'; return; }
     if (role === 'staff' && !isStaff()) { location.hash = '#/home'; return; }
+    if (role === 'admin' && state.user.role !== 'admin') { location.hash = isStaff() ? '#/admin' : '#/home'; return; }
     if (role === 'student' && isStaff()) { location.hash = '#/admin'; return; }
     const params = Object.fromEntries(keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
     window.scrollTo(0, 0);
@@ -139,12 +142,12 @@ function authFrame(formHtml) {
 async function loginView() {
   if (state.user) { location.hash = isStaff() ? '#/admin' : '#/home'; return; }
   try { const st = await get('/setup/status'); if (st.needsSetup) { location.hash = '#/setup'; return; } } catch (e) { toast('Không kết nối được máy chủ: ' + e.message, 'err'); }
-  authFrame(`<h2>Đăng nhập</h2><p class="muted">Dùng tài khoản cô Loan cấp, tài khoản em đã đăng ký, hoặc Gmail.</p>
+  authFrame(`<h2>Đăng nhập</h2><p class="muted">Dùng tài khoản cô Loan cấp cho em, hoặc Gmail đã gắn với tài khoản.</p>
     <form id="f"><label class="f">Tên đăng nhập<input name="username" autocomplete="username" required autofocus></label>
     <label class="f">Mật khẩu<input name="password" type="password" autocomplete="current-password" required></label>
     <button class="btn block accent">Đăng nhập</button></form>
     <div class="or" id="gor" style="display:none">hoặc</div><div class="gbtn-wrap" id="gbtn"></div>
-    <p class="small muted mt">Học sinh mới của cô Loan? <a href="#/register">Đăng ký bằng mã lớp</a></p>`);
+    <p class="small muted mt">Chưa có tài khoản? Em nhờ cô Loan tạo giúp nhé.</p>`);
   bindAuth('/auth/login');
   googleButton($('#gbtn'), (credential) => googleLogin(credential)).then((ok) => { if (ok) $('#gor').style.display = ''; });
 }
@@ -153,41 +156,9 @@ function finishLogin(r) {
   state.user = null;
   location.hash = r.user.role === 'student' ? '#/home' : '#/admin';
 }
-/** Đăng nhập Google; nếu Gmail chưa có tài khoản thì hỏi mã lớp để tạo tài khoản học sinh */
-async function googleLogin(credential, extra = {}) {
-  try {
-    finishLogin(await post('/auth/google', { credential, ...extra }));
-  } catch (e) {
-    if (!e.data?.needsRegister) { toast(e.message, 'err'); return; }
-    const d = e.data;
-    modal(`<h2>Tạo tài khoản học sinh</h2>
-      <p>Gmail <b>${esc(d.email)}</b> chưa có trong hệ thống. Nếu em là học sinh, nhập <b>mã lớp</b> cô Loan gửi để tạo tài khoản.</p>
-      <p class="small muted">Thầy cô / học sinh đã có tài khoản: hãy đăng nhập bằng tên đăng nhập và mật khẩu, rồi vào <b>Tài khoản → Liên kết Gmail</b>.</p>
-      <form id="gf" class="form-grid"><label class="f">Mã lớp<input name="joinCode" required style="text-transform:uppercase;letter-spacing:.1em"></label>
-      <label class="f">Họ và tên<input name="fullName" value="${esc(d.name || '')}" required></label></form>
-      <div class="actions"><button class="btn ghost" data-close>Huỷ</button><button class="btn accent" id="ok">Tạo tài khoản</button></div>`, {
-      onMount: (m, close) => m.querySelector('#ok').onclick = async () => {
-        const f = m.querySelector('#gf'); if (!f.reportValidity()) return;
-        try { finishLogin(await post('/auth/google', { credential, ...formData(f) })); close(); } catch (err) { toast(err.message, 'err'); }
-      },
-    });
-  }
-}
-function registerView() {
-  authFrame(`<h2>Đăng ký học sinh</h2><p class="muted">Nhập <b>mã lớp</b> cô Loan gửi cho lớp em.</p>
-    <form id="f"><label class="f">Mã lớp<input name="joinCode" required style="text-transform:uppercase;letter-spacing:.1em"></label>
-    <label class="f">Họ và tên<input name="fullName" required></label>
-    <label class="f">Tên đăng nhập<input name="username" required pattern="[A-Za-z0-9._\\-]{3,40}" title="3–40 ký tự: chữ không dấu, số, . _ -"></label>
-    <label class="f">Mật khẩu (ít nhất 6 ký tự)<input name="password" type="password" minlength="6" required></label>
-    <button class="btn block accent">Tạo tài khoản</button></form>
-    <div class="or" id="gor" style="display:none">hoặc nhập mã lớp ở trên rồi</div><div class="gbtn-wrap" id="gbtn"></div>
-    <p class="small muted mt">Đã có tài khoản? <a href="#/login">Đăng nhập</a></p>`);
-  bindAuth('/auth/register');
-  googleButton($('#gbtn'), (credential) => {
-    const f = formData($('#f'));
-    if (!f.joinCode) { toast('Hãy nhập mã lớp trước khi đăng ký bằng Google', 'err'); return; }
-    googleLogin(credential, { joinCode: f.joinCode, fullName: f.fullName });
-  }, 'signup_with').then((ok) => { if (ok) $('#gor').style.display = ''; });
+/** Đăng nhập Google (chỉ cho tài khoản đã có) */
+async function googleLogin(credential) {
+  try { finishLogin(await post('/auth/google', { credential })); } catch (e) { toast(e.message, 'err'); }
 }
 function setupView() {
   authFrame(`<h2>Thiết lập lần đầu</h2><p class="muted">Tạo tài khoản <b>quản trị viên</b> (chỉ làm một lần).</p>

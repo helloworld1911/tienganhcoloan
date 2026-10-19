@@ -138,7 +138,7 @@ function classForm(c = {}) {
 export async function classes() {
   layout('<div class="loading">Đang tải…</div>');
   const list = await get('/classes');
-  const main = layout(`<div class="page-head"><div><h1>Lớp & học sinh</h1><p>Mỗi lớp có <b>mã lớp</b> để học sinh tự đăng ký, hoặc cô tạo sẵn tài khoản cho các em.</p></div>
+  const main = layout(`<div class="page-head"><div><h1>Lớp & học sinh</h1><p>Học sinh không tự đăng ký được – quản trị viên tạo tài khoản trong từng lớp, hoặc ở mục <a href="#/admin/register">Đăng ký học sinh</a> bằng <b>mã lớp</b>.</p></div>
     <button class="btn accent" id="add">+ Tạo lớp</button></div>
     <div class="grid g3">${list.map((c) => `<div class="card assign-card"><div class="row between"><span class="t">${esc(c.name)}</span><span class="chip">${gradeName(c.grade)}</span></div>
       <div class="meta"><span>👩‍🎓 ${c.student_count} học sinh</span><span>📮 ${c.assignment_count} bài đã giao</span></div>
@@ -160,7 +160,7 @@ export async function classDetail({ id }) {
   const main = layout(`
     <div class="page-head"><div><div class="crumbs"><a href="#/admin/classes">Lớp</a> / ${esc(c.name)}</div><h1>Lớp ${esc(c.name)}</h1>
       <p>${gradeName(c.grade)}${c.school_year ? ' · ' + esc(c.school_year) : ''} · Mã lớp <span class="code">${esc(c.join_code)}</span> <button class="link-btn small" id="regen">đổi mã</button></p></div>
-      <div class="row"><button class="btn ghost" id="edit">Sửa lớp</button><button class="btn ghost" id="csv">⬇️ Xuất CSV</button><button class="btn accent" id="addSt">+ Thêm học sinh</button></div></div>
+      <div class="row"><button class="btn ghost" id="edit">Sửa lớp</button><button class="btn ghost" id="csv">⬇️ Xuất CSV</button>${state.user.role === 'admin' ? '<button class="btn accent" id="addSt">+ Thêm học sinh</button>' : ''}</div></div>
     <div class="grid g4 mb">
       <div class="card kpi accent"><span class="v">${d.students.length}</span><span class="l">học sinh</span></div>
       <div class="card kpi"><span class="v">${d.assignCount}</span><span class="l">bài đã giao</span></div>
@@ -182,7 +182,7 @@ export async function classDetail({ id }) {
           <td>${s.done_assignments}/${d.assignCount}</td><td>${pct(s.avg_percent)}</td><td>${spark(series)} ${trend == null ? '' : trend >= 0 ? `<span class="chip good">▲ ${Math.round(trend)}</span>` : `<span class="chip bad">▼ ${Math.round(-trend)}</span>`}</td>
           <td>${s.practice_count}</td><td class="small">${fmtAgo(s.last_submitted)}</td>
           <td class="nowrap"><button class="link-btn small" data-edit="${s.id}">Sửa</button> · <button class="link-btn danger small" data-del="${s.id}">Xoá</button></td></tr>`;
-        }).join('') || '<tr><td colspan="8" class="empty">Lớp chưa có học sinh. Bấm “+ Thêm học sinh” hoặc gửi mã lớp cho học sinh tự đăng ký.</td></tr>'}</tbody></table></div></div>`;
+        }).join('') || '<tr><td colspan="8" class="empty">Lớp chưa có học sinh. Quản trị viên bấm “+ Thêm học sinh” hoặc vào mục Đăng ký học sinh.</td></tr>'}</tbody></table></div></div>`;
     } else if (tab === 'topics') {
       const topicsUsed = d.topics.map((t) => t.topic);
       const st = {}; d.studentTopics.forEach((r) => { st[`${r.user_id}-${r.topic}`] = r.max ? Math.round((r.earned / r.max) * 100) : null; });
@@ -227,7 +227,7 @@ export async function classDetail({ id }) {
       if (dlb) dlb.onclick = async () => { close(); if (await confirmBox('Xoá lớp? Bài đã giao cho lớp sẽ bị xoá; tài khoản học sinh được giữ lại (không thuộc lớp nào).', { danger: true, ok: 'Xoá lớp' })) { await del('/classes/' + c.id); location.hash = '#/admin/classes'; } };
     },
   });
-  $('#addSt', main).onclick = () => addStudents(c, () => classDetail({ id }));
+  const addSt = $('#addSt', main); if (addSt) addSt.onclick = () => addStudents(c, () => classDetail({ id }));
 }
 const avgOf = (arr) => { const v = arr.filter((x) => x != null).map(Number); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
 function spark(series) {
@@ -405,6 +405,53 @@ export async function users() {
       const f = m.querySelector('#tf'); if (!f.reportValidity()) return;
       try { const r = await post('/users', { users: [formData(f)] }); if (r.errors.length) throw new Error(r.errors[0].error); close(); users(); } catch (err) { toast(err.message, 'err'); }
     },
+  });
+}
+
+// ================================================================ ĐĂNG KÝ HỌC SINH (chỉ quản trị viên)
+export async function registerStudent() {
+  layout('<div class="loading">Đang tải…</div>');
+  const cls = await get('/classes');
+  const made = [];
+  const main = layout(`<div class="page-head"><div><h1>Đăng ký học sinh</h1><p>Chỉ quản trị viên tạo được tài khoản. Nhập <b>mã lớp</b> để đưa học sinh vào đúng lớp.</p></div></div>
+    <div class="grid g2" style="align-items:start">
+      <div class="card"><h3>Tài khoản mới</h3>
+        <form id="rf" class="form-grid">
+          <label class="f">Mã lớp<input name="joinCode" required autocomplete="off" style="text-transform:uppercase;letter-spacing:.1em"><span class="small muted" id="clsName"></span></label>
+          <label class="f">Họ và tên<input name="fullName" required></label>
+          <div class="grid g2"><label class="f">Tên đăng nhập<input name="username" required pattern="[A-Za-z0-9._\\-]{3,40}" title="3–40 ký tự: chữ không dấu, số, . _ -"></label>
+            <label class="f">Mật khẩu (ít nhất 6 ký tự)<input name="password" value="123456" minlength="6" required></label></div>
+          <label class="f">Gmail của em (không bắt buộc – để đăng nhập bằng Google)<input name="email" type="email" placeholder="ten@gmail.com"></label>
+          <button class="btn accent" id="go">Tạo tài khoản</button>
+        </form>
+        <div id="made" class="mt"></div>
+      </div>
+      <div class="card"><h3>Mã các lớp</h3><p class="small muted">Bấm vào một lớp để điền mã.</p>
+        <div class="table-wrap"><table class="t"><thead><tr><th>Lớp</th><th>Khối</th><th>Mã lớp</th><th>Học sinh</th></tr></thead><tbody>
+        ${cls.map((c) => `<tr class="click" data-code="${esc(c.join_code)}"><td><b>${esc(c.name)}</b></td><td>${gradeName(c.grade)}</td><td><span class="code">${esc(c.join_code)}</span></td><td>${c.student_count}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">Chưa có lớp – hãy <a href="#/admin/classes">tạo lớp</a> trước.</td></tr>'}
+        </tbody></table></div></div>
+    </div>`);
+  const f = $('#rf', main);
+  const byCode = (v) => cls.find((c) => c.join_code.toUpperCase() === String(v).trim().toUpperCase());
+  const showCls = () => { const c = byCode(f.joinCode.value); $('#clsName', main).textContent = f.joinCode.value ? (c ? `→ Lớp ${c.name}` : 'Không có lớp nào có mã này') : ''; return c; };
+  let touched = false;
+  const autoUser = () => { if (touched) return; const c = byCode(f.joinCode.value); f.username.value = f.fullName.value ? slug(f.fullName.value) + (c ? c.name.toLowerCase().replace(/[^a-z0-9]/g, '') : '') : ''; };
+  f.joinCode.addEventListener('input', () => { showCls(); autoUser(); });
+  f.fullName.addEventListener('input', autoUser);
+  f.username.addEventListener('input', () => { touched = !!f.username.value; });
+  main.addEventListener('click', (e) => { const tr = e.target.closest('[data-code]'); if (!tr) return; f.joinCode.value = tr.dataset.code; showCls(); autoUser(); f.fullName.focus(); });
+  f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = $('#go', main); if (btn.disabled) return; btn.disabled = true;
+    try {
+      const r = await post('/users/register', formData(f));
+      made.unshift({ ...r.user, password: f.password.value, className: r.class.name });
+      toast(`Đã tạo tài khoản cho ${r.user.full_name}`);
+      const code = f.joinCode.value, pw = f.password.value;
+      f.reset(); f.joinCode.value = code; f.password.value = pw; touched = false; showCls(); f.fullName.focus();
+      $('#made', main).innerHTML = `<h3>Vừa tạo</h3><div class="table-wrap"><table class="t"><thead><tr><th>Họ tên</th><th>Lớp</th><th>Tên đăng nhập</th><th>Mật khẩu</th></tr></thead><tbody>
+        ${made.map((u) => `<tr><td><b>${esc(u.full_name)}</b>${u.email ? `<div class="small muted">${esc(u.email)}</div>` : ''}</td><td>${esc(u.className)}</td><td>@${esc(u.username)}</td><td><span class="code">${esc(u.password)}</span></td></tr>`).join('')}</tbody></table></div>`;
+    } catch (err) { toast(err.message, 'err'); } finally { btn.disabled = false; }
   });
 }
 
