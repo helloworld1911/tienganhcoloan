@@ -126,6 +126,35 @@ const r2 = await api(new Request('http://localhost' + media.url, { headers: { ra
 const b2 = new Uint8Array(await r2.arrayBuffer());
 ok(r2.status === 206 && b2[b2.length - 1] === audio[audio.length - 1], 'đọc tới cuối file nghe');
 
+// 6c2. Nhập file nghe từ link (giả lập Google Drive bằng máy chủ cục bộ)
+const http = await import('node:http');
+const { driveId, directUrl } = await import('../netlify/lib/remote-audio.mjs');
+ok(driveId('https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp/view?usp=sharing') === '1AbCdEfGhIjKlMnOp'
+  && driveId('https://drive.google.com/open?id=1AbCdEfGhIjKlMnOp') === '1AbCdEfGhIjKlMnOp'
+  && directUrl('https://www.dropbox.com/s/x/a.mp3?dl=0').endsWith('dl=1'), 'nhận diện link Google Drive / Dropbox');
+const big = new Uint8Array(5 * 1024 * 1024 + 777).map((_, i) => (i * 7) % 253);
+const srv = http.createServer((req, res) => {
+  if (req.url.startsWith('/private')) { res.writeHead(200, { 'content-type': 'text/html' }); return res.end('<html>Sign in</html>'); }
+  const m = (req.headers.range || '').match(/bytes=(\d+)-(\d+)/);
+  if (req.url.startsWith('/norange') || !m) { res.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': big.length }); return res.end(Buffer.from(big)); }
+  const a = +m[1], b = Math.min(+m[2], big.length - 1);
+  res.writeHead(206, { 'content-type': 'audio/mpeg', 'content-range': `bytes ${a}-${b}/${big.length}`, 'content-disposition': 'attachment; filename="Part 1.mp3"' });
+  res.end(Buffer.from(big.slice(a, b + 1)));
+});
+await new Promise((r) => srv.listen(5577, r));
+process.env.ALLOW_HTTP_AUDIO = '1';
+for (const path of ['/ranged', '/norange']) {
+  const imp = await call('POST', '/media/import', { url: 'http://127.0.0.1:5577' + path });
+  for (let n = 0; n < imp.chunks; n++) await call('POST', `/media/${imp.id}/fetch/${n}`);
+  const got = new Uint8Array(await (await api(new Request('http://localhost' + imp.url, { headers: { range: 'bytes=3145728-' } }))).arrayBuffer());
+  ok(imp.size === big.length && got[0] === big[3145728] && got[got.length - 1] === big[big.length - 1], `nhập file nghe từ link (${path}) → phát lại đúng dữ liệu`);
+}
+let privErr = null; try { await call('POST', '/media/import', { url: 'http://127.0.0.1:5577/private' }); } catch (e) { privErr = e.message; }
+ok(/chia sẻ công khai/.test(privErr || ''), 'link chưa chia sẻ: báo lỗi dễ hiểu');
+const head = await api(new Request('http://localhost' + media.url, { method: 'HEAD' }));
+ok(head.status === 200 || head.status === 206, 'hỗ trợ yêu cầu HEAD (Safari)');
+srv.close();
+
 // 6d. Gmail cho học sinh + cấu hình Google
 const cfg = await call('GET', '/config', null, null);
 ok('googleClientId' in cfg, 'API cấu hình Google');

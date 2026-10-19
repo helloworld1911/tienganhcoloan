@@ -1,6 +1,6 @@
 // Lược đồ CSDL – được tạo tự động ở lần gọi API đầu tiên (CREATE ... IF NOT EXISTS)
 // Tăng số này mỗi khi sửa lược đồ bên dưới (để máy chủ tự cập nhật bảng một lần)
-export const SCHEMA_VERSION = '3';
+export const SCHEMA_VERSION = '4';
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS classes (
@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS media (
   created_by INT REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE media ADD COLUMN IF NOT EXISTS source TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_set BOOLEAN NOT NULL DEFAULT true;

@@ -114,9 +114,12 @@ export const heatColor = (p) => {
   return `hsl(${h} 65% ${78 - (p / 100) * 8}%)`;
 };
 
+/** Link Google Drive không phát trực tiếp được trong trang → phát qua máy chủ web (chuyển tiếp từng đoạn) */
 export function driveAudio(url) {
-  const m = String(url || '').match(/drive\.google\.com\/(?:file\/d\/|open\?id=)([\w-]+)/);
-  return m ? `https://drive.google.com/uc?export=download&id=${m[1]}` : url;
+  const s = String(url || '');
+  if (!/drive\.google\.com|drive\.usercontent\.google\.com|docs\.google\.com/.test(s)) return s;
+  const m = s.match(/\/file\/d\/([\w-]{10,})/) || s.match(/[?&]id=([\w-]{10,})/) || s.match(/\/d\/([\w-]{10,})/);
+  return m ? `/api/drive/${m[1]}` : s;
 }
 export function debounce(fn, ms) { let t; const d = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; d.cancel = () => clearTimeout(t); return d; }
 

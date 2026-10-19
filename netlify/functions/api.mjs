@@ -5,6 +5,7 @@ import { q, one, batch, ensureSchema, pingDb, driverKind } from '../lib/db.mjs';
 import { hashPassword, verifyPassword, signToken, verifyToken, randomCode } from '../lib/auth.mjs';
 import { gradeAttempt, totals, stripAnswers } from '../lib/grade.mjs';
 import { putChunk, getChunk } from '../lib/storage.mjs';
+import { driveId, directUrl, fetchRange } from '../lib/remote-audio.mjs';
 import crypto from 'node:crypto';
 
 export const config = { path: '/api/*' };
@@ -42,7 +43,9 @@ export default async function handler(req) {
     await ensureSchema();
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/api/, '') || '/';
-    const r = routes.find((x) => x.method === req.method && x.re.test(path));
+    // HEAD (Safari hay hỏi trước khi phát file nghe) dùng chung xử lý với GET
+    const method = req.method === 'HEAD' ? 'GET' : req.method;
+    const r = routes.find((x) => x.method === method && x.re.test(path));
     if (!r) fail(404, 'Không tìm thấy API');
     const m = path.match(r.re);
     const params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
@@ -65,7 +68,8 @@ export default async function handler(req) {
     if (r.role === 'admin' && user?.role !== 'admin') fail(user ? 403 : 401, 'Chỉ dành cho quản trị viên');
     if (r.role === 'student' && user?.role !== 'student') fail(user ? 403 : 401, 'Chỉ dành cho học sinh');
     const out = await r.handler({ req, url, params, body, user, query: Object.fromEntries(url.searchParams) });
-    return out instanceof Response ? out : json(out ?? { ok: true });
+    const res = out instanceof Response ? out : json(out ?? { ok: true });
+    return req.method === 'HEAD' ? new Response(null, { status: res.status, headers: res.headers }) : res;
   } catch (e) {
     if (e instanceof HttpError) return json({ error: e.message }, e.status);
     if (e?.code === '23505') return json({ error: 'Dữ liệu bị trùng (tên đăng nhập hoặc mã đã tồn tại)' }, 409);
@@ -229,6 +233,56 @@ route('GET', '/media/:id', null, async ({ params, req }) => {
       ...(whole ? {} : { 'content-range': `bytes ${start}-${end}/${size}` }),
       'cache-control': 'public, max-age=31536000, immutable',
     },
+  });
+});
+
+/** Nhập file nghe từ link (Google Drive, Dropbox, OneDrive, link mp3) về máy chủ web – bước 1: kiểm tra link */
+route('POST', '/media/import', 'staff', async ({ body, user }) => {
+  const src = clean(body.url, 2000);
+  if (!src) fail(400, 'Hãy dán link file nghe');
+  const url = directUrl(src);
+  let probe;
+  try { probe = await fetchRange(url, 0, 0); } catch (e) { fail(400, e.message); }
+  if (!probe.total || !Number.isFinite(probe.total)) fail(400, 'Không xác định được dung lượng file nghe từ link này');
+  if (probe.total > 80 * 1024 * 1024) fail(400, 'File nghe phải nhỏ hơn 80MB');
+  if (probe.total < 1000) fail(400, 'Link không phải file âm thanh');
+  const id = crypto.randomBytes(18).toString('base64url');
+  const chunks = Math.ceil(probe.total / CHUNK);
+  await q('INSERT INTO media(id,name,mime,size,chunk_size,chunks,created_by,source) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
+    [id, clean(probe.filename || 'file nghe', 200), probe.mime, probe.total, CHUNK, chunks, user.id, url]);
+  return { id, chunks, url: `/api/media/${id}`, name: probe.filename, size: probe.total, ranged: probe.status === 206 };
+});
+/** Bước 2: máy chủ tải mảnh thứ n từ link và lưu lại (mỗi lần gọi 1 mảnh để không quá thời gian chạy) */
+route('POST', '/media/:id/fetch/:n', 'staff', async ({ params }) => {
+  const m = await one('SELECT * FROM media WHERE id=$1', [params.id]);
+  if (!m || !m.source) fail(404, 'Không tìm thấy file');
+  const n = int(params.n);
+  if (n == null || n < 0 || n >= m.chunks) fail(400, 'Mảnh không hợp lệ');
+  const start = n * m.chunk_size, end = Math.min(Number(m.size), start + m.chunk_size) - 1;
+  let r;
+  try { r = await fetchRange(m.source, start, end); } catch (e) { fail(400, e.message); }
+  let buf = r.buf;
+  // máy chủ nguồn không hỗ trợ Range → trả cả file: cắt đúng đoạn cần
+  if (r.status === 200 && buf.length === Number(m.size)) buf = buf.slice(start, end + 1);
+  if (buf.length !== end - start + 1) fail(400, `Tải mảnh ${n + 1} chưa đủ dữ liệu, hãy thử lại`);
+  await putChunk(`${m.id}/${n}`, buf);
+  return { ok: true };
+});
+/** Phát trực tiếp file Google Drive (cho đề cũ còn dùng link Drive) – máy chủ web chuyển tiếp từng đoạn */
+route('GET', '/drive/:fid', null, async ({ params, req }) => {
+  if (!/^[\w-]{10,}$/.test(params.fid)) fail(400, 'Link không hợp lệ');
+  const src = `https://drive.usercontent.google.com/download?id=${params.fid}&export=download&confirm=t`;
+  const want = (req.headers.get('range') || '').match(/bytes=(\d*)-(\d*)/);
+  const start = want && want[1] !== '' ? +want[1] : 0;
+  const end = start + CHUNK - 1;
+  let r;
+  try { r = await fetchRange(src, start, want && want[2] ? Math.min(+want[2], end) : end); } catch (e) { fail(400, e.message); }
+  const total = r.total;
+  const realEnd = start + r.buf.length - 1;
+  return new Response(r.buf, {
+    status: 206,
+    headers: { 'content-type': r.mime, 'accept-ranges': 'bytes', 'content-length': String(r.buf.length),
+      'content-range': `bytes ${start}-${realEnd}/${total}`, 'cache-control': 'public, max-age=86400' },
   });
 });
 

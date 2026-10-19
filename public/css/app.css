@@ -278,3 +278,6 @@ details.transcript div { white-space: pre-line; margin-top: 8px; font-family: va
   background-repeat: no-repeat; transition: opacity .2s; }
 #netbar.on { opacity: 1; animation: netbar 1s linear infinite; }
 @keyframes netbar { from { background-position: -50% 0; } to { background-position: 150% 0; } }
+
+.audio-row { padding: 10px 0; border-top: 1px dashed var(--line); }
+.audio-row:first-child { border-top: 0; }

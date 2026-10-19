@@ -63,13 +63,58 @@ export async function uploadAudio(file, onProgress = () => {}) {
   }
   return m.url;
 }
+/** Nhập file nghe từ link (Google Drive, Dropbox…) về máy chủ web để phát ổn định */
+export async function importAudioLink(link, onProgress = () => {}) {
+  link = String(link || '').trim();
+  if (!link || link.startsWith('/api/media/')) return link;
+  const m = await post('/media/import', { url: link });
+  onProgress(0.02);
+  for (let n = 0; n < m.chunks; n++) {
+    let ok = false;
+    for (let tries = 0; tries < 3 && !ok; tries++) {
+      try { await post(`/media/${m.id}/fetch/${n}`); ok = true; } catch (e) { if (tries === 2) throw e; }
+    }
+    onProgress((n + 1) / m.chunks);
+  }
+  return m.url;
+}
+/** Gắn xử lý cho các ô file nghe [data-audio] trong root. onSet(key, url) được gọi khi có file mới. */
+export function bindAudioInputs(root, onSet, pending = new Set()) {
+  const run = async (box, job, label) => {
+    const prog = box.querySelector('[data-aact="prog"]');
+    const pick = box.querySelector('[data-aact="pick"]'); pick.disabled = true;
+    const p = job((x) => { prog.textContent = `${label} ${Math.round(x * 100)}%`; });
+    pending.add(p);
+    try { const url = await p; onSet(box.dataset.audio, url); toast('Đã lưu file nghe lên máy chủ web', 'ok'); }
+    catch (err) { toast(err.message, 'err'); prog.textContent = '⚠️ ' + err.message; }
+    finally { pending.delete(p); pick.disabled = false; }
+  };
+  root.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-aact]'); if (!b) return;
+    const box = b.closest('[data-audio]');
+    if (b.dataset.aact === 'pick') box.querySelector('[data-aact="file"]').click();
+    if (b.dataset.aact === 'clear') onSet(box.dataset.audio, '');
+  });
+  root.addEventListener('change', (e) => {
+    const el = e.target.closest('[data-aact]'); if (!el) return;
+    const box = el.closest('[data-audio]');
+    if (el.dataset.aact === 'url') {
+      const v = el.value.trim();
+      if (!v) { onSet(box.dataset.audio, ''); return; }
+      if (v.startsWith('/api/media/')) { onSet(box.dataset.audio, v); return; }
+      run(box, (pr) => importAudioLink(v, pr), 'Đang lấy file từ link…');
+    }
+    if (el.dataset.aact === 'file' && el.files[0]) run(box, (pr) => uploadAudio(el.files[0], pr), 'Đang tải lên…');
+  });
+  return pending;
+}
 function audioBox(target, url) {
   return `<div class="audio-box" data-audio="${target}">
     ${url ? `<audio controls preload="none" src="${esc(url)}"></audio>` : '<div class="small muted">Chưa có file nghe</div>'}
     <div class="row small">
       <button type="button" class="btn ghost sm" data-aact="pick">⬆️ ${url ? 'Đổi file nghe' : 'Tải file nghe (mp3)'}</button>
       <input type="file" accept="audio/*,.mp3,.m4a,.wav,.ogg" hidden data-aact="file">
-      <input data-aact="url" value="${esc(url || '')}" placeholder="hoặc dán link mp3 / Google Drive" style="flex:1;min-width:200px">
+      <input data-aact="url" value="${esc(url || '')}" placeholder="hoặc dán link Google Drive / Dropbox / mp3 rồi bấm ra ngoài" style="flex:1;min-width:200px">
       ${url ? '<button type="button" class="link-btn danger small" data-aact="clear">Bỏ file</button>' : ''}
       <span class="muted" data-aact="prog"></span>
     </div></div>`;
@@ -144,12 +189,46 @@ export function uploadView() {
       <label class="row small"><input type="checkbox" id="dropL"> Bỏ phần <b>Nghe</b> (Listening) – để trống nếu muốn giữ, sau khi quét sẽ tải file nghe lên</label>
       <label class="row small mt-s"><input type="checkbox" id="dropW" checked> Bỏ phần <b>Viết đoạn văn / viết thư</b> (tự luận – cần giáo viên chấm)</label>
       <p class="small muted mt-s" style="margin:0">Phần <i>viết lại câu</i>, <i>dựng câu</i> luôn được giữ. Phần Nghe được giữ cùng tranh (câu chọn tranh) và lời thoại trong file đáp án.</p></div>
+    <div class="card mt flat" id="audioCard"><h3>🎧 File nghe <span class="chip">không bắt buộc</span></h3>
+      <p class="small muted" style="margin-top:0">Tải file mp3 từ máy, hoặc dán link <b>Google Drive</b> (đã chia sẻ “Bất kỳ ai có đường liên kết”) / Dropbox / link mp3 – web sẽ tự lấy file về để học sinh nghe ổn định. Dùng <b>file chung</b> nếu cả đề chỉ có 1 file nghe, hoặc điền riêng cho từng Part.</p>
+      <div id="audioRows"><div class="small muted">Chọn file đề ở bước 1 để hiện các phần Nghe (Part 1, Part 2, Part 3…).</div></div></div>
     <div class="hint mt"><b>Mẹo để quét chính xác:</b> mỗi câu bắt đầu bằng số (<i>1.</i> hoặc <i>Câu 1:</i>), mỗi dạng bài có tiêu đề <i>Part 1.</i>/<i>Exercise 1.</i>/<i>I.</i> kèm câu hướng dẫn tiếng Anh (Choose…, Rewrite…, Read…). Đáp án dạng <i>1. B</i>, <i>1-B</i> hoặc bảng “Câu | Đáp án” đều được. Nhiều đáp án đúng cho một câu thì ngăn cách bằng “/” (điền từ) hoặc “|” (viết câu).</div>
     <div class="row mt"><button class="btn accent" id="scan">🔍 Quét đề</button><span class="small muted" id="st"></span></div>
     <input type="file" id="picker" accept=".docx,.pdf,.txt" hidden>`);
   let mode = 'file', pickFor = null;
   $('#mode', main).addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; mode = b.dataset.m; $$('#mode button', main).forEach((x) => x.classList.toggle('on', x === b)); $('#fileMode', main).style.display = mode === 'file' ? '' : 'none'; $('#pasteMode', main).style.display = mode === 'paste' ? '' : 'none'; });
-  const setFile = (k, f) => { files[k] = f; const dz = main.querySelector(`.dropzone[data-k="${k}"]`); dz.querySelector('.file').textContent = '📎 ' + f.name; dz.style.borderColor = 'var(--good)'; };
+  // ---- file nghe theo từng Part (chọn ngay khi tải đề)
+  const audioSel = { all: '', parts: [] };
+  let listenParts = [];
+  let examCache = null; // { file, blocks }
+  const pendingAudio = bindAudioInputs(main.querySelector('#audioCard'), (key, url) => {
+    if (key === 'all') audioSel.all = url; else audioSel.parts[+key.slice(1)] = url;
+    renderAudioRows();
+  });
+  const renderAudioRows = () => {
+    const rows = [`<div class="audio-row"><b>File nghe chung cho cả đề</b> <span class="small muted">(đĩa nghe là 1 file liền cho tất cả các Part)</span>${audioBox('all', audioSel.all)}</div>`];
+    listenParts.forEach((p, i) => rows.push(`<div class="audio-row"><b>🎧 ${esc(p.title || 'Phần ' + (i + 1))}</b> <span class="small muted">– ${esc((p.instruction || '').slice(0, 110))}${(p.instruction || '').length > 110 ? '…' : ''} (${p.questions.length} câu)</span>${audioBox('p' + i, audioSel.parts[i])}</div>`));
+    if (!listenParts.length) rows.push('<div class="small muted">Không thấy phần Nghe trong đề (hoặc chưa chọn file đề). Có thể dùng file nghe chung ở trên.</div>');
+    main.querySelector('#audioRows').innerHTML = rows.join('');
+  };
+  const detectListening = async () => {
+    try {
+      let blocks;
+      if (mode === 'file') {
+        if (!files.exam) return;
+        if (examCache?.file !== files.exam) examCache = { file: files.exam, blocks: await fileToBlocks(files.exam) };
+        blocks = examCache.blocks;
+      } else blocks = textToBlocks($('#pe', main).value);
+      const ex = parseExam(splitEmbeddedKey(blocks).exam, {});
+      listenParts = ex.parts.filter((p) => p.topic === 'listening');
+      renderAudioRows();
+    } catch (e) { console.warn(e); }
+  };
+  const setFile = (k, f) => {
+    files[k] = f; const dz = main.querySelector(`.dropzone[data-k="${k}"]`); dz.querySelector('.file').textContent = '📎 ' + f.name; dz.style.borderColor = 'var(--good)';
+    if (k === 'exam') detectListening();
+  };
+  $('#pe', main).addEventListener('change', detectListening);
   $$('.dropzone', main).forEach((dz) => {
     dz.onclick = () => { pickFor = dz.dataset.k; $('#picker', main).click(); };
     dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('over'); };
@@ -160,11 +239,12 @@ export function uploadView() {
   $('#scan', main).onclick = async () => {
     const st = $('#st', main);
     try {
+      if (pendingAudio.size) { st.textContent = 'Đang chờ lấy xong file nghe…'; await Promise.allSettled([...pendingAudio]); }
       let examBlocks, keyBlocks = null, name = 'Đề mới';
       if (mode === 'file') {
         if (!files.exam) { toast('Hãy chọn file đề bài', 'err'); return; }
         st.textContent = 'Đang đọc file…';
-        examBlocks = await fileToBlocks(files.exam); name = files.exam.name;
+        examBlocks = examCache?.file === files.exam ? examCache.blocks : await fileToBlocks(files.exam); name = files.exam.name;
         if (files.key) keyBlocks = await fileToBlocks(files.key);
       } else {
         examBlocks = textToBlocks($('#pe', main).value);
@@ -180,6 +260,9 @@ export function uploadView() {
       const removed = finalizeExam(exam, { drop });
       if (!exam.parts.length) throw new Error('Sau khi bỏ phần Nghe/Viết thì đề không còn câu nào. Bỏ chọn tuỳ chọn để giữ lại.');
       if (removed.questions) toast(`Đã bỏ ${removed.questions} câu thuộc phần bạn chọn bỏ`);
+      // gắn file nghe đã chọn: Part Nghe thứ i ↔ ô thứ i
+      if (audioSel.all) exam.audioUrl = audioSel.all;
+      exam.parts.filter((p) => p.topic === 'listening').forEach((p, i) => { if (audioSel.parts[i]) p.audioUrl = audioSel.parts[i]; });
       exam.sourceName = mode === 'file' ? [files.exam?.name, files.key?.name].filter(Boolean).join(' + ') : 'Dán văn bản';
       sessionStorage.setItem('draftExam', JSON.stringify(exam));
       const sm = summarize(exam);
@@ -346,25 +429,7 @@ export async function editExam({ id }) {
     else { exam.parts[+target].audioUrl = url; draw(); }
     markDirty();
   };
-  main.addEventListener('click', (e) => {
-    const b = e.target.closest('[data-aact]'); if (!b) return;
-    const box = b.closest('[data-audio]');
-    if (b.dataset.aact === 'pick') box.querySelector('[data-aact="file"]').click();
-    if (b.dataset.aact === 'clear') setAudio(box.dataset.audio, '');
-  });
-  main.addEventListener('change', async (e) => {
-    const el = e.target.closest('[data-aact]'); if (!el) return;
-    const box = el.closest('[data-audio]');
-    if (el.dataset.aact === 'url') { setAudio(box.dataset.audio, el.value.trim()); return; }
-    if (el.dataset.aact !== 'file' || !el.files[0]) return;
-    const prog = box.querySelector('[data-aact="prog"]');
-    const pick = box.querySelector('[data-aact="pick"]'); pick.disabled = true;
-    try {
-      const url = await uploadAudio(el.files[0], (x) => { prog.textContent = `Đang tải lên… ${Math.round(x * 100)}%`; });
-      setAudio(box.dataset.audio, url);
-      toast('Đã tải file nghe lên. Nhớ bấm “Lưu đề”.', 'ok');
-    } catch (err) { toast(err.message, 'err'); prog.textContent = ''; pick.disabled = false; }
-  });
+  bindAudioInputs(main, setAudio);
   // nạp đáp án cho đề đã có
   $('#keyBtn', main).onclick = () => $('#keyPick', main).click();
   $('#keyPick', main).onchange = async (e) => {
