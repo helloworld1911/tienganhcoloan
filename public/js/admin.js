@@ -187,9 +187,10 @@ function addStudents(c, done) {
   modal(`<h2>Thêm học sinh vào lớp ${esc(c.name)}</h2>
     <div class="tabs" id="mt"><button class="on" data-t="one">Từng em</button><button data-t="bulk">Nhập danh sách</button></div>
     <div id="one" class="form-grid"><label class="f">Họ và tên<input id="fn"></label>
-      <div class="grid g2"><label class="f">Tên đăng nhập<input id="un"></label><label class="f">Mật khẩu<input id="pw" value="123456"></label></div></div>
+      <div class="grid g2"><label class="f">Tên đăng nhập<input id="un"></label><label class="f">Mật khẩu<input id="pw" value="123456"></label></div>
+      <label class="f">Gmail của em (không bắt buộc – để đăng nhập bằng Google)<input id="em" type="email" placeholder="ten@gmail.com"></label></div>
     <div id="bulk" class="form-grid" style="display:none">
-      <p class="small muted">Mỗi dòng một học sinh: <b>Họ tên, tên đăng nhập, mật khẩu</b>. Có thể chỉ ghi họ tên – hệ thống tự tạo tên đăng nhập (vd. <i>Nguyễn Văn An → annv${esc(c.name.toLowerCase().replace(/\s/g, ''))}</i>) và mật khẩu mặc định <b>123456</b>. Có thể dán trực tiếp từ Excel.</p>
+      <p class="small muted">Mỗi dòng một học sinh: <b>Họ tên, tên đăng nhập, mật khẩu, Gmail</b> (Gmail không bắt buộc – có thì em đăng nhập được bằng Google). Có thể chỉ ghi họ tên – hệ thống tự tạo tên đăng nhập (vd. <i>Nguyễn Văn An → annv${esc(c.name.toLowerCase().replace(/\s/g, ''))}</i>) và mật khẩu mặc định <b>123456</b>. Có thể dán trực tiếp từ Excel.</p>
       <textarea id="bl" rows="10" placeholder="Nguyễn Văn An, annv6a, 123456&#10;Trần Thị Bình&#10;Lê Minh Chi"></textarea></div>
     <div id="res"></div>
     <div class="actions"><button class="btn ghost" data-close>Đóng</button><button class="btn" id="ok">Thêm</button></div>`, {
@@ -200,9 +201,9 @@ function addStudents(c, done) {
       m.querySelector('#mt').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; mode = b.dataset.t; $$('#mt button', m).forEach((x) => x.classList.toggle('on', x === b)); m.querySelector('#one').style.display = mode === 'one' ? '' : 'none'; m.querySelector('#bulk').style.display = mode === 'bulk' ? '' : 'none'; });
       m.querySelector('#ok').onclick = async () => {
         let users;
-        if (mode === 'one') users = [{ fullName: m.querySelector('#fn').value, username: m.querySelector('#un').value, password: m.querySelector('#pw').value, classId: c.id }];
+        if (mode === 'one') users = [{ fullName: m.querySelector('#fn').value, username: m.querySelector('#un').value, password: m.querySelector('#pw').value, email: m.querySelector('#em').value, classId: c.id }];
         else users = m.querySelector('#bl').value.split('\n').map((l) => l.split(/\t|,|;/).map((x) => x.trim())).filter((p) => p[0])
-          .map(([fullName, username, password]) => ({ fullName, username: username || slug(fullName) + suffix, password: password || '123456', classId: c.id }));
+          .map(([fullName, username, password, email]) => ({ fullName, username: username || slug(fullName) + suffix, password: password || '123456', email: email || '', classId: c.id }));
         if (!users.length) return;
         try {
           const r = await post('/users', { users });
@@ -218,6 +219,7 @@ function editStudent(s, allClasses, done) {
   modal(`<h2>Sửa học sinh</h2><form id="ef" class="form-grid">
     <label class="f">Họ và tên<input name="fullName" value="${esc(s.full_name)}"></label>
     <label class="f">Lớp<select name="classId"><option value="">— Không thuộc lớp —</option>${allClasses.map((c) => `<option value="${c.id}" ${c.id === s.class_id || location.hash.endsWith('/' + c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+    <label class="f">Gmail (để em đăng nhập bằng Google)<input name="email" type="email" value="${esc(s.email || '')}" placeholder="ten@gmail.com"></label>
     <label class="f">Đặt lại mật khẩu (để trống nếu không đổi)<input name="password" placeholder="Mật khẩu mới"></label>
     <label class="row small"><input type="checkbox" name="active" ${s.active !== false ? 'checked' : ''}> Cho phép đăng nhập</label></form>
     <div class="actions"><button class="btn ghost" data-close>Huỷ</button><button class="btn" id="ok">Lưu</button></div>`, {
@@ -306,15 +308,15 @@ export async function users() {
   const main = layout(`<div class="page-head"><div><h1>Tài khoản</h1><p>Giáo viên, quản trị viên và toàn bộ học sinh</p></div>
     ${isAdmin ? '<button class="btn accent" id="addT">+ Tài khoản giáo viên</button>' : ''}</div>
     <div class="row mb"><div class="seg" id="fs"><button class="on" data-f="staff">Giáo viên / quản trị</button><button data-f="student">Học sinh</button></div><input id="q" placeholder="Tìm tên hoặc tên đăng nhập…" style="max-width:300px"></div>
-    <div class="card"><div class="table-wrap"><table class="t"><thead><tr><th>Họ tên</th><th>Tên đăng nhập</th><th>Vai trò</th><th>Lớp</th><th>Đăng nhập gần nhất</th><th></th></tr></thead><tbody id="tb"></tbody></table></div></div>`);
+    <div class="card"><div class="table-wrap"><table class="t"><thead><tr><th>Họ tên</th><th>Tên đăng nhập</th><th>Gmail</th><th>Vai trò</th><th>Lớp</th><th>Đăng nhập gần nhất</th><th></th></tr></thead><tbody id="tb"></tbody></table></div></div>`);
   const roleName = { admin: 'Quản trị', teacher: 'Giáo viên', student: 'Học sinh' };
   const draw = () => {
     const rows = list.filter((u) => (filter === 'staff' ? u.role !== 'student' : u.role === 'student'))
       .filter((u) => !q || (u.full_name + ' ' + u.username).toLowerCase().includes(q));
-    $('#tb', main).innerHTML = rows.slice(0, 500).map((u) => `<tr><td><b>${esc(u.full_name)}</b>${u.active ? '' : ' <span class="chip bad">khoá</span>'}</td><td>@${esc(u.username)}</td><td>${roleName[u.role]}</td>
+    $('#tb', main).innerHTML = rows.slice(0, 500).map((u) => `<tr><td><b>${esc(u.full_name)}</b>${u.active ? '' : ' <span class="chip bad">khoá</span>'}</td><td>@${esc(u.username)}</td><td class="small">${u.email ? esc(u.email) + (u.google_linked ? ' ✅' : '') : '<span class="muted">—</span>'}</td><td>${roleName[u.role]}</td>
       <td>${u.class_name ? `<a href="#/admin/class/${u.class_id}">${esc(u.class_name)}</a>` : '—'}</td><td class="small">${fmtAgo(u.last_login)}</td>
       <td class="nowrap">${u.role === 'student' ? `<a class="small" href="#/admin/student/${u.id}">Tiến trình</a> · ` : ''}${u.role === 'student' || isAdmin ? `<button class="link-btn small" data-edit="${u.id}">Sửa</button>` : ''}${u.id !== state.user.id && (u.role === 'student' || isAdmin) ? ` · <button class="link-btn danger small" data-del="${u.id}">Xoá</button>` : ''}</td></tr>`).join('')
-      || '<tr><td colspan="6" class="empty">Không có tài khoản</td></tr>';
+      || '<tr><td colspan="7" class="empty">Không có tài khoản</td></tr>';
   };
   draw();
   $('#fs', main).addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; filter = b.dataset.f; $$('#fs button', main).forEach((x) => x.classList.toggle('on', x === b)); draw(); });
@@ -325,6 +327,7 @@ export async function users() {
       const u = list.find((x) => x.id === +ed.dataset.edit);
       if (u.role === 'student') editStudent(u, cls, () => users());
       else modal(`<h2>Sửa tài khoản</h2><form id="ef" class="form-grid"><label class="f">Họ tên<input name="fullName" value="${esc(u.full_name)}"></label>
+        <label class="f">Gmail (để đăng nhập bằng Google)<input name="email" type="email" value="${esc(u.email || '')}"></label>
         <label class="f">Vai trò<select name="role"><option value="teacher" ${u.role === 'teacher' ? 'selected' : ''}>Giáo viên</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Quản trị viên</option></select></label>
         <label class="f">Mật khẩu mới (để trống nếu không đổi)<input name="password"></label><label class="row small"><input type="checkbox" name="active" ${u.active ? 'checked' : ''}> Cho phép đăng nhập</label></form>
         <div class="actions"><button class="btn ghost" data-close>Huỷ</button><button class="btn" id="ok">Lưu</button></div>`, {

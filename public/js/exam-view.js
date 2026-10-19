@@ -71,7 +71,7 @@ function reviewBox(q, r, { showAnswers, grading }) {
 export function renderExam(content, { mode = 'take', answers = {}, results = null, showAnswers = false, grading = false, filter = 'all' } = {}) {
   const rmap = results ? Object.fromEntries(results.map((r) => [r.id, r])) : {};
   let lastSection = null;
-  let html = '';
+  let html = content.audioUrl ? `<div class="card audio-main"><b>🎧 File nghe của đề</b><span class="small muted"> – bấm ▶ để nghe, có thể tua lại</span><audio controls preload="none" src="${esc(driveAudio(content.audioUrl))}"></audio></div>` : '';
   for (const p of content.parts) {
     let qs = p.questions;
     if (results && filter === 'wrong') qs = qs.filter((q) => rmap[q.id] && !rmap[q.id].correct && !rmap[q.id].pending);
@@ -83,6 +83,7 @@ export function renderExam(content, { mode = 'take', answers = {}, results = nul
       <div class="instr mt-s">${esc(p.instruction || '')}</div></div>
       ${p.audioUrl ? `<audio controls preload="none" src="${esc(driveAudio(p.audioUrl))}"></audio>` : ''}
       ${p.passageHtml ? `<div class="passage">${p.passageHtml}</div>` : ''}
+      ${results && showAnswers && p.transcript ? `<details class="transcript"><summary>📜 Lời thoại bài nghe (transcript)</summary><div>${esc(p.transcript)}</div></details>` : ''}
       ${qs.map((q) => {
         const r = rmap[q.id];
         const given = results ? r?.given : answers[q.id];
@@ -103,7 +104,7 @@ export function renderExam(content, { mode = 'take', answers = {}, results = nul
       }).join('')}
     </div>`;
   }
-  return html || '<div class="card empty">Không có câu nào phù hợp bộ lọc.</div>';
+  return html.replace(/^<div class="card audio-main">[\s\S]*?<\/audio><\/div>$/, '') || '<div class="card empty">Không có câu nào phù hợp bộ lọc.</div>';
 }
 
 function navGrid(content, answers, results) {

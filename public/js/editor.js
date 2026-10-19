@@ -1,5 +1,5 @@
 // Ngân hàng đề: tải lên & quét đề, chỉnh sửa, giao bài
-import { get, post, put, del } from './api.js';
+import { get, post, put, del, upload } from './api.js';
 import { layout } from './app.js';
 import { esc, toast, modal, confirmBox, formData, fmtDate, fmtAgo, pct, bar, topicLabel, $, $$ } from './ui.js';
 import { TOPICS, QTYPES, htmlToBlocks, textToBlocks, pdfPagesToBlocks, parseExam, attachAnswerKey, finalizeExam, splitEmbeddedKey, summarize, interpretAnswer, stripTags, cleanHtml } from './parser.js';
@@ -31,12 +31,63 @@ async function pdfToBlocks(buf) {
   if (blocks.length < 5) throw new Error('PDF này không có lớp chữ (có thể là ảnh scan). Hãy dùng file Word hoặc PDF xuất từ Word.');
   return blocks;
 }
+/** Thu nhỏ ảnh lớn (tối đa 520px, JPEG) để đề không quá nặng */
+function shrinkImage(src) {
+  if (src.length < 80_000) return Promise.resolve(src);
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, 520 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL('image/jpeg', 0.78));
+    };
+    img.onerror = () => resolve('');
+    img.src = src;
+  });
+}
+
+/** Tải file nghe lên theo từng mảnh. onProgress(0..1). Trả về đường dẫn phát. */
+export async function uploadAudio(file, onProgress = () => {}) {
+  if (!/^audio\//.test(file.type) && !/\.(mp3|m4a|wav|ogg|aac)$/i.test(file.name)) throw new Error('Hãy chọn file âm thanh (.mp3, .m4a, .wav, .ogg)');
+  if (file.size > 80 * 1024 * 1024) throw new Error('File nghe phải nhỏ hơn 80MB');
+  const m = await post('/media', { name: file.name, size: file.size, mime: file.type || 'audio/mpeg' });
+  for (let n = 0; n < m.chunks; n++) {
+    const blob = file.slice(n * m.chunkSize, Math.min(file.size, (n + 1) * m.chunkSize));
+    let ok = false;
+    for (let tries = 0; tries < 3 && !ok; tries++) {
+      try { await upload(`/media/${m.id}/${n}`, blob); ok = true; } catch (e) { if (tries === 2) throw e; }
+    }
+    onProgress((n + 1) / m.chunks);
+  }
+  return m.url;
+}
+function audioBox(target, url) {
+  return `<div class="audio-box" data-audio="${target}">
+    ${url ? `<audio controls preload="none" src="${esc(url)}"></audio>` : '<div class="small muted">Chưa có file nghe</div>'}
+    <div class="row small">
+      <button type="button" class="btn ghost sm" data-aact="pick">⬆️ ${url ? 'Đổi file nghe' : 'Tải file nghe (mp3)'}</button>
+      <input type="file" accept="audio/*,.mp3,.m4a,.wav,.ogg" hidden data-aact="file">
+      <input data-aact="url" value="${esc(url || '')}" placeholder="hoặc dán link mp3 / Google Drive" style="flex:1;min-width:200px">
+      ${url ? '<button type="button" class="link-btn danger small" data-aact="clear">Bỏ file</button>' : ''}
+      <span class="muted" data-aact="prog"></span>
+    </div></div>`;
+}
+
 export async function fileToBlocks(file) {
   const ext = file.name.split('.').pop().toLowerCase();
   const buf = await file.arrayBuffer();
   if (ext === 'docx') {
     const mammoth = await loadMammoth();
-    const r = await mammoth.convertToHtml({ arrayBuffer: buf }, { styleMap: ['u => u', 'b => b', 'i => i'] });
+    const r = await mammoth.convertToHtml({ arrayBuffer: buf }, {
+      styleMap: ['u => u', 'b => b', 'i => i'],
+      convertImage: mammoth.images.imgElement(async (image) => {
+        if (!/^image\/(png|jpe?g|gif|webp|bmp)$/.test(image.contentType)) return { src: '' }; // ảnh EMF/WMF trình duyệt không hiển thị được
+        const b64 = await image.read('base64');
+        return { src: await shrinkImage(`data:${image.contentType};base64,${b64}`) };
+      }),
+    });
     return htmlToBlocks(r.value);
   }
   if (ext === 'pdf') return pdfToBlocks(buf);
@@ -90,9 +141,9 @@ export function uploadView() {
       <div class="card"><h3>Đáp án</h3><textarea id="pk" rows="16" placeholder="1. B&#10;2. C&#10;36. could&#10;76. Are you good at making friends?"></textarea></div>
     </div>
     <div class="card mt flat"><h3>Tuỳ chọn</h3>
-      <label class="row small"><input type="checkbox" id="dropL" checked> Bỏ phần <b>Nghe</b> (Listening)</label>
+      <label class="row small"><input type="checkbox" id="dropL"> Bỏ phần <b>Nghe</b> (Listening) – để trống nếu muốn giữ, sau khi quét sẽ tải file nghe lên</label>
       <label class="row small mt-s"><input type="checkbox" id="dropW" checked> Bỏ phần <b>Viết đoạn văn / viết thư</b> (tự luận – cần giáo viên chấm)</label>
-      <p class="small muted mt-s" style="margin:0">Giữ lại các dạng chấm tự động được để học sinh tự luyện. Phần <i>viết lại câu</i>, <i>dựng câu</i> vẫn được giữ.</p></div>
+      <p class="small muted mt-s" style="margin:0">Phần <i>viết lại câu</i>, <i>dựng câu</i> luôn được giữ. Phần Nghe được giữ cùng tranh (câu chọn tranh) và lời thoại trong file đáp án.</p></div>
     <div class="hint mt"><b>Mẹo để quét chính xác:</b> mỗi câu bắt đầu bằng số (<i>1.</i> hoặc <i>Câu 1:</i>), mỗi dạng bài có tiêu đề <i>Part 1.</i>/<i>Exercise 1.</i>/<i>I.</i> kèm câu hướng dẫn tiếng Anh (Choose…, Rewrite…, Read…). Đáp án dạng <i>1. B</i>, <i>1-B</i> hoặc bảng “Câu | Đáp án” đều được. Nhiều đáp án đúng cho một câu thì ngăn cách bằng “/” (điền từ) hoặc “|” (viết câu).</div>
     <div class="row mt"><button class="btn accent" id="scan">🔍 Quét đề</button><span class="small muted" id="st"></span></div>
     <input type="file" id="picker" accept=".docx,.pdf,.txt" hidden>`);
@@ -128,7 +179,7 @@ export function uploadView() {
       const drop = [$('#dropL', main).checked && 'listening', $('#dropW', main).checked && 'writing'].filter(Boolean);
       const removed = finalizeExam(exam, { drop });
       if (!exam.parts.length) throw new Error('Sau khi bỏ phần Nghe/Viết thì đề không còn câu nào. Bỏ chọn tuỳ chọn để giữ lại.');
-      if (removed.questions) toast(`Đã bỏ ${removed.questions} câu thuộc phần Nghe / Viết tự luận`);
+      if (removed.questions) toast(`Đã bỏ ${removed.questions} câu thuộc phần bạn chọn bỏ`);
       exam.sourceName = mode === 'file' ? [files.exam?.name, files.key?.name].filter(Boolean).join(' + ') : 'Dán văn bản';
       sessionStorage.setItem('draftExam', JSON.stringify(exam));
       const sm = summarize(exam);
@@ -157,12 +208,14 @@ export async function editExam({ id }) {
   let dirty = id === 'draft';
   const main = layout(`<div class="page-head"><div><div class="crumbs"><a href="#/admin/exams">Ngân hàng đề</a> / ${id === 'draft' ? 'Đề mới (chưa lưu)' : 'Sửa đề'}</div>
       <h1>${id === 'draft' ? 'Kiểm tra kết quả quét' : 'Sửa đề'}</h1><p>Kiểm tra lại dạng bài, câu hỏi và đáp án trước khi lưu. Câu thiếu đáp án được tô vàng.</p></div>
-      <div class="row">${id !== 'draft' ? `<a class="btn ghost" href="#/admin/exam/${id}/preview">👁 Xem trước</a><a class="btn ghost" href="#/admin/assignments?exam=${id}">📮 Giao bài</a>` : ''}<button class="btn ghost" id="dropBtn">✂️ Bỏ phần Nghe & Viết</button><button class="btn ghost" id="keyBtn">✅ Nạp file đáp án</button></div></div>
+      <div class="row">${id !== 'draft' ? `<a class="btn ghost" href="#/admin/exam/${id}/preview">👁 Xem trước</a><a class="btn ghost" href="#/admin/assignments?exam=${id}">📮 Giao bài</a>` : ''}<button class="btn ghost" id="dropBtn">✂️ Bỏ phần Viết tự luận</button><button class="btn ghost" id="keyBtn">✅ Nạp file đáp án</button></div></div>
     <div class="card mb"><div class="grid g4">
       <label class="f" style="grid-column:span 2">Tên đề<input id="m_title" value="${esc(meta.title || '')}"></label>
       <label class="f">Khối lớp<select id="m_grade"><option value="">—</option>${Array.from({ length: 12 }, (_, i) => `<option ${meta.grade === i + 1 ? 'selected' : ''}>${i + 1}</option>`).join('')}</select></label>
       <label class="f">Thời gian (phút)<input id="m_time" type="number" min="0" value="${meta.timeLimit ?? ''}" placeholder="không giới hạn"></label>
-    </div><div id="sum" class="row mt"></div></div>
+    </div>
+    <div class="mt"><b class="small">🎧 File nghe chung cho cả đề</b> <span class="small muted">(dùng khi đĩa nghe là một file liền cho tất cả các phần Nghe)</span>${audioBox('exam', exam.audioUrl)}</div>
+    <div id="sum" class="row mt"></div></div>
     <div id="parts"></div>
     <button class="btn ghost" id="addPart">+ Thêm phần</button>
     <div class="sticky-actions row between"><span class="small muted" id="dirty"></span><div class="row"><button class="btn accent" id="save">💾 Lưu đề</button></div></div>
@@ -207,7 +260,8 @@ export async function editExam({ id }) {
     <div class="pb">
       <label class="f">Hướng dẫn<textarea data-pf="instruction" rows="2" style="min-height:0">${esc(p.instruction || '')}</textarea></label>
       <details ${p.passageHtml ? 'open' : ''}><summary class="small"><b>Bài đọc / đoạn văn / bảng</b> ${p.passageHtml ? '' : '(trống)'}</summary><div class="rich passage-ed mt-s" contenteditable="true" data-pf="passageHtml">${p.passageHtml || ''}</div></details>
-      ${p.topic === 'listening' || p.audioUrl ? `<label class="f">Link file nghe (mp3 hoặc link Google Drive chia sẻ công khai)<input data-pf="audioUrl" value="${esc(p.audioUrl || '')}" placeholder="https://…"></label>` : ''}
+      ${p.topic === 'listening' || p.audioUrl ? `<div><b class="small">🎧 File nghe của phần này</b> <span class="small muted">(bỏ trống nếu dùng file nghe chung của đề)</span>${audioBox(pi, p.audioUrl)}</div>
+      <details ${p.transcript ? '' : ''}><summary class="small"><b>Lời thoại (transcript)</b> – học sinh xem được sau khi nộp bài ${p.transcript ? '' : '(trống)'}</summary><textarea data-pf="transcript" rows="6" class="mt-s">${esc(p.transcript || '')}</textarea></details>` : ''}
       <div>${p.questions.map((q, qi) => qHtml(p, pi, q, qi)).join('')}</div>
       <div class="row"><button class="btn ghost sm" data-act="addq">+ Thêm câu</button><label class="small row">Chia đều điểm: <input type="number" step="0.5" min="0" data-act-input="partpts" placeholder="tổng điểm phần" style="width:120px"></label></div>
     </div></div>`;
@@ -281,11 +335,36 @@ export async function editExam({ id }) {
     const copy = JSON.parse(JSON.stringify(exam));
     finalizeExam(copy);
     const n = before - summarize(copy).total;
-    if (!n) { toast('Đề không có phần Nghe hoặc Viết tự luận'); return; }
+    if (!n) { toast('Đề không có phần Viết đoạn văn / thư tự luận'); return; }
     if (!copy.parts.length) { toast('Bỏ xong sẽ không còn câu nào', 'err'); return; }
-    if (!(await confirmBox(`Bỏ <b>${n}</b> câu thuộc phần Nghe / Viết đoạn-thư? (Nhớ bấm Lưu đề sau đó)`, { ok: 'Bỏ' }))) return;
+    if (!(await confirmBox(`Bỏ <b>${n}</b> câu thuộc phần Viết đoạn văn / thư (tự luận)? Muốn bỏ phần Nghe thì bấm “Xoá phần” ở phần đó. (Nhớ bấm Lưu đề sau đó)`, { ok: 'Bỏ' }))) return;
     exam.parts = copy.parts; draw(); markDirty();
   };
+  // ---- file nghe (cả đề hoặc từng phần)
+  const setAudio = (target, url) => {
+    if (target === 'exam') { exam.audioUrl = url; const box = main.querySelector('[data-audio="exam"]'); box.outerHTML = audioBox('exam', url); }
+    else { exam.parts[+target].audioUrl = url; draw(); }
+    markDirty();
+  };
+  main.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-aact]'); if (!b) return;
+    const box = b.closest('[data-audio]');
+    if (b.dataset.aact === 'pick') box.querySelector('[data-aact="file"]').click();
+    if (b.dataset.aact === 'clear') setAudio(box.dataset.audio, '');
+  });
+  main.addEventListener('change', async (e) => {
+    const el = e.target.closest('[data-aact]'); if (!el) return;
+    const box = el.closest('[data-audio]');
+    if (el.dataset.aact === 'url') { setAudio(box.dataset.audio, el.value.trim()); return; }
+    if (el.dataset.aact !== 'file' || !el.files[0]) return;
+    const prog = box.querySelector('[data-aact="prog"]');
+    const pick = box.querySelector('[data-aact="pick"]'); pick.disabled = true;
+    try {
+      const url = await uploadAudio(el.files[0], (x) => { prog.textContent = `Đang tải lên… ${Math.round(x * 100)}%`; });
+      setAudio(box.dataset.audio, url);
+      toast('Đã tải file nghe lên. Nhớ bấm “Lưu đề”.', 'ok');
+    } catch (err) { toast(err.message, 'err'); prog.textContent = ''; pick.disabled = false; }
+  });
   // nạp đáp án cho đề đã có
   $('#keyBtn', main).onclick = () => $('#keyPick', main).click();
   $('#keyPick', main).onchange = async (e) => {

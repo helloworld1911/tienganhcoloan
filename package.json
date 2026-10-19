@@ -11,11 +11,11 @@
     "test:real": "node test/real.test.mjs"
   },
   "dependencies": {
+    "@netlify/blobs": "^11.1.4",
     "@netlify/database": "^2.0.1"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.3.0",
-    "@electric-sql/pglite-socket": "^0.0.10",
     "mammoth": "^1.8.0",
     "pdfjs-dist": "^4.10.38"
   },

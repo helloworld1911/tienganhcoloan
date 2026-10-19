@@ -4,6 +4,8 @@
 import { q, one, tx, ensureSchema } from '../lib/db.mjs';
 import { hashPassword, verifyPassword, signToken, verifyToken, randomCode } from '../lib/auth.mjs';
 import { gradeAttempt, totals, stripAnswers } from '../lib/grade.mjs';
+import { putChunk, getChunk } from '../lib/storage.mjs';
+import crypto from 'node:crypto';
 
 export const config = { path: '/api/*' };
 
@@ -33,7 +35,7 @@ export default async function handler(req) {
     const m = path.match(r.re);
     const params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
     let body = {};
-    if (req.method !== 'GET' && req.method !== 'DELETE') {
+    if (req.method !== 'GET' && req.method !== 'DELETE' && !(req.headers.get('content-type') || '').startsWith('application/octet-stream')) {
       const text = await req.text();
       if (text) { try { body = JSON.parse(text); } catch { fail(400, 'Dữ liệu gửi lên không hợp lệ'); } }
     }
@@ -41,7 +43,7 @@ export default async function handler(req) {
     const token = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
     if (token) {
       const p = verifyToken(token);
-      if (p) user = await one('SELECT id, username, full_name, role, class_id, active FROM users WHERE id=$1', [p.sub]);
+      if (p) user = await one('SELECT id, username, full_name, role, class_id, active, email, google_sub, password_set FROM users WHERE id=$1', [p.sub]);
       if (user && !user.active) user = null;
     }
     if (r.role === 'auth' && !user) fail(401, 'Bạn cần đăng nhập');
@@ -58,7 +60,7 @@ export default async function handler(req) {
   }
 }
 
-const publicUser = (u) => u && ({ id: u.id, username: u.username, fullName: u.full_name, role: u.role, classId: u.class_id });
+const publicUser = (u) => u && ({ id: u.id, username: u.username, fullName: u.full_name, role: u.role, classId: u.class_id, email: u.email || null, googleLinked: !!u.google_sub, passwordSet: u.password_set !== false });
 const login = (u) => ({ token: signToken({ sub: u.id, role: u.role }), user: publicUser(u) });
 const USERNAME_RE = /^[a-zA-Z0-9._-]{3,40}$/;
 const checkCreds = (username, password) => {
@@ -100,11 +102,120 @@ route('GET', '/me', 'auth', async ({ user }) => {
   return { user: publicUser(user), class: cls };
 });
 route('POST', '/me/password', 'auth', async ({ user, body }) => {
-  const u = await one('SELECT password_hash FROM users WHERE id=$1', [user.id]);
-  if (!verifyPassword(body.oldPassword, u.password_hash)) fail(400, 'Mật khẩu cũ không đúng');
+  const u = await one('SELECT password_hash, password_set FROM users WHERE id=$1', [user.id]);
+  if (u.password_set && !verifyPassword(body.oldPassword, u.password_hash)) fail(400, 'Mật khẩu cũ không đúng');
   if (!body.newPassword || body.newPassword.length < 6) fail(400, 'Mật khẩu mới tối thiểu 6 ký tự');
-  await q('UPDATE users SET password_hash=$1 WHERE id=$2', [hashPassword(body.newPassword), user.id]);
+  await q('UPDATE users SET password_hash=$1, password_set=true WHERE id=$2', [hashPassword(body.newPassword), user.id]);
   return { ok: true };
+});
+
+
+// ================================================================ ĐĂNG NHẬP GOOGLE
+route('GET', '/config', null, async () => ({ googleClientId: process.env.GOOGLE_CLIENT_ID || null }));
+
+async function verifyGoogle(credential) {
+  const cid = process.env.GOOGLE_CLIENT_ID;
+  if (!cid) fail(400, 'Chưa cấu hình đăng nhập Google (thiếu GOOGLE_CLIENT_ID)');
+  if (!credential || typeof credential !== 'string') fail(400, 'Thiếu thông tin đăng nhập Google');
+  const res = await fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(credential));
+  const t = await res.json().catch(() => ({}));
+  if (!res.ok || t.aud !== cid || !['accounts.google.com', 'https://accounts.google.com'].includes(t.iss)) fail(401, 'Đăng nhập Google không hợp lệ, hãy thử lại');
+  if (+t.exp * 1000 < Date.now()) fail(401, 'Phiên Google đã hết hạn, hãy bấm đăng nhập lại');
+  if (t.email_verified !== 'true' && t.email_verified !== true) fail(401, 'Email Google chưa được xác minh');
+  return { sub: t.sub, email: String(t.email).toLowerCase(), name: t.name || t.email.split('@')[0] };
+}
+async function uniqueUsername(base) {
+  let u = base.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/^[._-]+/, '').slice(0, 30) || 'hocsinh';
+  if (u.length < 3) u = u + 'hs';
+  for (let i = 0; i < 50; i++) {
+    const cand = i ? `${u}${i + 1}` : u;
+    if (!(await one('SELECT 1 FROM users WHERE username=$1', [cand]))) return cand;
+  }
+  return u + crypto.randomBytes(3).toString('hex');
+}
+/** Đăng nhập bằng Google. Nếu chưa có tài khoản: cần mã lớp để tạo tài khoản học sinh. */
+route('POST', '/auth/google', null, async ({ body }) => {
+  const g = await verifyGoogle(body.credential);
+  let u = await one('SELECT * FROM users WHERE google_sub=$1', [g.sub]);
+  if (!u) {
+    u = await one('SELECT * FROM users WHERE lower(email)=$1 AND google_sub IS NULL', [g.email]);
+    if (u) await q('UPDATE users SET google_sub=$1 WHERE id=$2', [g.sub, u.id]);
+  }
+  if (!u) {
+    if (!body.joinCode) return json({ needsRegister: true, email: g.email, name: g.name }, 404);
+    const cls = await one('SELECT * FROM classes WHERE upper(join_code)=upper($1)', [clean(body.joinCode, 20)]);
+    if (!cls) fail(400, 'Mã lớp không đúng. Hãy hỏi giáo viên mã lớp của em.');
+    const username = await uniqueUsername(g.email.split('@')[0]);
+    u = await one(`INSERT INTO users(username,password_hash,full_name,role,class_id,email,google_sub,password_set)
+                   VALUES($1,$2,$3,'student',$4,$5,$6,false) RETURNING *`,
+    [username, hashPassword(crypto.randomBytes(24).toString('hex')), clean(body.fullName) || g.name, cls.id, g.email, g.sub]);
+  }
+  if (!u.active) fail(403, 'Tài khoản đã bị khoá');
+  await q('UPDATE users SET last_login=now() WHERE id=$1', [u.id]);
+  return login(u);
+});
+/** Liên kết Gmail vào tài khoản đang đăng nhập */
+route('POST', '/me/google', 'auth', async ({ body, user }) => {
+  const g = await verifyGoogle(body.credential);
+  const other = await one('SELECT id FROM users WHERE (google_sub=$1 OR lower(email)=$2) AND id<>$3', [g.sub, g.email, user.id]);
+  if (other) fail(409, 'Gmail này đã được dùng cho một tài khoản khác');
+  await q('UPDATE users SET google_sub=$1, email=$2 WHERE id=$3', [g.sub, g.email, user.id]);
+  return { ok: true, email: g.email };
+});
+route('DELETE', '/me/google', 'auth', async ({ user }) => {
+  if (user.password_set === false) fail(400, 'Hãy đặt mật khẩu trước khi bỏ liên kết Gmail (nếu không sẽ không đăng nhập được)');
+  await q('UPDATE users SET google_sub=NULL WHERE id=$1', [user.id]);
+  return { ok: true };
+});
+
+// ================================================================ FILE NGHE (tải lên theo mảnh)
+const CHUNK = 3 * 1024 * 1024; // 3MB / mảnh (giới hạn mỗi lần gửi của Netlify Functions là 6MB)
+route('POST', '/media', 'staff', async ({ body, user }) => {
+  const size = Number(body.size);
+  if (!size || size > 80 * 1024 * 1024) fail(400, 'File phải nhỏ hơn 80MB');
+  const mime = /^audio\/[\w.+-]+$/.test(body.mime || '') ? body.mime : 'audio/mpeg';
+  const id = crypto.randomBytes(18).toString('base64url');
+  const chunks = Math.ceil(size / CHUNK);
+  await q('INSERT INTO media(id,name,mime,size,chunk_size,chunks,created_by) VALUES($1,$2,$3,$4,$5,$6,$7)', [id, clean(body.name, 200), mime, size, CHUNK, chunks, user.id]);
+  return { id, chunkSize: CHUNK, chunks, url: `/api/media/${id}` };
+});
+route('PUT', '/media/:id/:n', 'staff', async ({ params, req }) => {
+  const m = await one('SELECT * FROM media WHERE id=$1', [params.id]);
+  if (!m) fail(404, 'Không tìm thấy file');
+  const n = int(params.n);
+  if (n == null || n < 0 || n >= m.chunks) fail(400, 'Mảnh không hợp lệ');
+  const buf = new Uint8Array(await req.arrayBuffer());
+  const expected = n === m.chunks - 1 ? Number(m.size) - n * m.chunk_size : m.chunk_size;
+  if (buf.length !== expected) fail(400, `Mảnh ${n} sai kích thước`);
+  await putChunk(`${m.id}/${n}`, buf);
+  return { ok: true };
+});
+/** Phát file: trả về đúng đoạn được yêu cầu (Range), mỗi lần tối đa 1 mảnh */
+route('GET', '/media/:id', null, async ({ params, req }) => {
+  const m = await one('SELECT * FROM media WHERE id=$1', [params.id]);
+  if (!m) fail(404, 'Không tìm thấy file nghe');
+  const size = Number(m.size), cs = m.chunk_size;
+  const rg = (req.headers.get('range') || '').match(/bytes=(\d*)-(\d*)/);
+  let start = 0, end = size - 1;
+  if (rg) {
+    if (rg[1] === '' && rg[2]) { start = Math.max(0, size - +rg[2]); }
+    else { start = +rg[1] || 0; if (rg[2]) end = Math.min(+rg[2], size - 1); }
+  }
+  if (start >= size) return new Response(null, { status: 416, headers: { 'content-range': `bytes */${size}` } });
+  const idx = Math.floor(start / cs);
+  end = Math.min(end, (idx + 1) * cs - 1, size - 1);
+  const chunk = await getChunk(`${m.id}/${idx}`);
+  if (!chunk) fail(404, 'File nghe chưa tải lên xong');
+  const body = chunk.slice(start - idx * cs, end - idx * cs + 1);
+  const whole = !rg && size <= cs;
+  return new Response(body, {
+    status: whole ? 200 : 206,
+    headers: {
+      'content-type': m.mime, 'accept-ranges': 'bytes', 'content-length': String(body.length),
+      ...(whole ? {} : { 'content-range': `bytes ${start}-${end}/${size}` }),
+      'cache-control': 'public, max-age=31536000, immutable',
+    },
+  });
 });
 
 // ================================================================ LỚP HỌC
@@ -130,7 +241,7 @@ route('GET', '/users', 'staff', async ({ query }) => {
   if (query.classId) { args.push(query.classId); where.push(`u.class_id=$${args.length}`); }
   if (query.role) { args.push(query.role); where.push(`u.role=$${args.length}`); }
   if (query.q) { args.push('%' + query.q.toLowerCase() + '%'); where.push(`(lower(u.full_name) LIKE $${args.length} OR u.username LIKE $${args.length})`); }
-  return q(`SELECT u.id,u.username,u.full_name,u.role,u.class_id,u.active,u.created_at,u.last_login,c.name AS class_name
+  return q(`SELECT u.id,u.username,u.full_name,u.role,u.class_id,u.active,u.created_at,u.last_login,u.email,(u.google_sub IS NOT NULL) AS google_linked,c.name AS class_name
             FROM users u LEFT JOIN classes c ON c.id=u.class_id ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
             ORDER BY c.name NULLS FIRST, u.full_name LIMIT 2000`, args);
 });
@@ -145,8 +256,10 @@ route('POST', '/users', 'staff', async ({ body, user }) => {
       if (role !== 'student' && user.role !== 'admin') fail(403, 'Chỉ quản trị viên được tạo tài khoản giáo viên');
       checkCreds(it.username, it.password);
       if (!clean(it.fullName)) fail(400, 'Thiếu họ tên');
-      const u = await one('INSERT INTO users(username,password_hash,full_name,role,class_id) VALUES($1,$2,$3,$4,$5) RETURNING id,username,full_name,role,class_id',
-        [it.username.toLowerCase(), hashPassword(it.password), clean(it.fullName), role, int(it.classId)]);
+      const email = clean(it.email, 120).toLowerCase() || null;
+      if (email && !/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(email)) fail(400, 'Email không hợp lệ');
+      const u = await one('INSERT INTO users(username,password_hash,full_name,role,class_id,email) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,username,full_name,role,class_id,email',
+        [it.username.toLowerCase(), hashPassword(it.password), clean(it.fullName), role, int(it.classId), email]);
       created.push(u);
     } catch (e) {
       errors.push({ row: i + 1, username: it.username, error: e.code === '23505' ? 'Tên đăng nhập đã tồn tại' : e.message });
@@ -163,11 +276,16 @@ route('PUT', '/users/:id', 'staff', async ({ params, body, user }) => {
   if (body.fullName !== undefined) set('full_name', clean(body.fullName));
   if (body.classId !== undefined) set('class_id', int(body.classId));
   if (body.active !== undefined) set('active', !!body.active);
+  if (body.email !== undefined) {
+    const email = clean(body.email, 120).toLowerCase() || null;
+    if (email && !/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(email)) fail(400, 'Email không hợp lệ');
+    if (email !== (target.email || null)) { set('email', email); args.push(null); sets.push(`google_sub=$${args.length}`); }
+  }
   if (body.password) { if (body.password.length < 6) fail(400, 'Mật khẩu tối thiểu 6 ký tự'); set('password_hash', hashPassword(body.password)); }
   if (body.role && user.role === 'admin' && ['admin', 'teacher', 'student'].includes(body.role)) set('role', body.role);
   if (!sets.length) return { ok: true };
   args.push(params.id);
-  return one(`UPDATE users SET ${sets.join(',')} WHERE id=$${args.length} RETURNING id,username,full_name,role,class_id,active`, args);
+  return one(`UPDATE users SET ${sets.join(',')} WHERE id=$${args.length} RETURNING id,username,full_name,role,class_id,active,email`, args);
 });
 route('DELETE', '/users/:id', 'staff', async ({ params, user }) => {
   if (+params.id === user.id) fail(400, 'Không thể tự xoá chính mình');
@@ -193,7 +311,7 @@ function validateContent(c) {
       ids.add(x.id);
     });
   });
-  if (JSON.stringify(c).length > 2_000_000) fail(400, 'Đề quá lớn');
+  if (JSON.stringify(c).length > 4_500_000) fail(400, 'Đề quá lớn (nhiều ảnh nặng). Hãy giảm bớt ảnh.');
   return c;
 }
 route('GET', '/exams', 'staff', async () => q(`
@@ -249,6 +367,9 @@ route('POST', '/assignments', 'staff', async ({ body }) => {
   const show = ['after_submit', 'after_due', 'never'].includes(body.showAnswers) ? body.showAnswers : 'after_submit';
   const out = [];
   for (const cid of classIds) {
+    // chống tạo trùng (bấm nút nhiều lần khi mạng chậm)
+    const dup = await one(`SELECT * FROM assignments WHERE exam_id=$1 AND class_id=$2 AND created_at > now() - interval '2 minutes' ORDER BY id DESC LIMIT 1`, [exam.id, cid]);
+    if (dup) { out.push(dup); continue; }
     out.push(await one(`INSERT INTO assignments(exam_id,class_id,title,opens_at,due_at,time_limit,max_attempts,show_answers)
                         VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
     [exam.id, cid, clean(body.title, 300) || null, body.opensAt || null, body.dueAt || null, int(body.timeLimit), int(body.maxAttempts) || 0, show]));
@@ -393,7 +514,10 @@ route('GET', '/my/attempts', 'student', async ({ user }) => q(`
 route('GET', '/my/stats', 'student', async ({ user }) => studentStats(user.id));
 
 // ================================================================ LUYỆN TẬP THEO CHUYÊN ĐỀ
-const NO_PRACTICE = new Set(['listening', 'writing']); // cần file nghe / giáo viên chấm
+const NO_PRACTICE = new Set(['writing']); // cần giáo viên chấm
+// Phần nghe chỉ luyện được khi đề có file nghe (của phần hoặc của cả đề)
+const audioOf = (e, p) => p.audioUrl || (p.topic === 'listening' ? e.content.audioUrl || '' : '');
+const skipPart = (e, p) => NO_PRACTICE.has(p.topic) || (p.topic === 'listening' && !audioOf(e, p));
 // Chỉ lấy câu từ những bài em đã nộp hoặc đã hết hạn (tránh lộ đáp án bài đang làm).
 async function practicePool(user) {
   return q(`SELECT e.id AS exam_id, e.content FROM exams e WHERE e.id IN (
@@ -407,7 +531,7 @@ route('GET', '/practice/topics', 'student', async ({ user }) => {
   const pool = await practicePool(user);
   const count = {};
   for (const e of pool) for (const p of e.content.parts) {
-    if (NO_PRACTICE.has(p.topic)) continue;
+    if (skipPart(e, p)) continue;
     const n = p.questions.filter((x) => x.type !== 'essay' && x.answer).length;
     if (n) count[p.topic] = (count[p.topic] || 0) + n;
   }
@@ -420,10 +544,10 @@ route('POST', '/practice/start', 'student', async ({ user, body }) => {
   const want = Math.min(Math.max(int(body.count) || 10, 3), 40);
   const groups = []; // giữ nguyên nhóm câu có chung bài đọc
   for (const e of pool) for (const p of e.content.parts) {
-    if (p.topic !== body.topic || NO_PRACTICE.has(p.topic)) continue;
+    if (p.topic !== body.topic || skipPart(e, p)) continue;
     const qs = p.questions.filter((x) => x.type !== 'essay' && x.answer);
     if (!qs.length) continue;
-    if (p.passageHtml && /class="gap"|<table/.test(p.passageHtml) || (p.passageHtml && p.passageHtml.length > 200)) groups.push({ p, qs, e: e.exam_id, whole: true });
+    if (p.topic === 'listening' || (p.passageHtml && /class="gap"|<table/.test(p.passageHtml)) || (p.passageHtml && p.passageHtml.length > 200)) groups.push({ p: { ...p, audioUrl: audioOf(e, p) }, qs, e: e.exam_id, whole: true });
     else for (const x of qs) groups.push({ p, qs: [x], e: e.exam_id });
   }
   if (!groups.length) fail(404, 'Chưa có câu hỏi cho chuyên đề này');
@@ -500,7 +624,7 @@ route('GET', '/dashboard/class/:id', 'staff', async ({ params }) => {
   if (!cls) fail(404, 'Không tìm thấy lớp');
   const assignCount = (await one('SELECT count(*)::int AS n FROM assignments WHERE class_id=$1', [cls.id])).n;
   const students = await q(`
-    SELECT u.id, u.full_name, u.username, u.active, u.last_login,
+    SELECT u.id, u.full_name, u.username, u.active, u.last_login, u.email, u.class_id,
       count(t.id) FILTER (WHERE t.status='submitted')::int AS submissions,
       count(DISTINCT t.assignment_id) FILTER (WHERE t.status='submitted')::int AS done_assignments,
       round(avg(t.percent) FILTER (WHERE t.status='submitted' AND t.kind='assignment'),1) AS avg_percent,

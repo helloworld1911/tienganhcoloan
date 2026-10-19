@@ -257,3 +257,17 @@ audio { width: 100%; margin: 6px 0 10px; }
 .spinner { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.4); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading { color: var(--muted); padding: 40px; text-align: center; }
+
+/* nghe & tranh */
+.audio-main { position: sticky; top: 8px; z-index: 6; margin-bottom: 14px; }
+.audio-main audio, .audio-box audio { width: 100%; margin: 6px 0; }
+.audio-box { border: 1px dashed #cfcabd; border-radius: 10px; padding: 10px 12px; margin-top: 6px; background: #fbfaf7; display: grid; gap: 6px; }
+.opt img { max-width: 100%; max-height: 150px; display: block; border-radius: 6px; }
+.opt:has(img) { flex-direction: column; align-items: flex-start; }
+.stem-text img, .passage img { max-width: 100%; height: auto; }
+details.transcript { margin: 8px 0 14px; background: var(--blue-soft); border-radius: 10px; padding: 8px 14px; }
+details.transcript summary { cursor: pointer; font-weight: 600; color: #22397f; }
+details.transcript div { white-space: pre-line; margin-top: 8px; font-family: var(--serif); line-height: 1.7; }
+.gbtn-wrap { display: flex; justify-content: center; min-height: 44px; }
+.or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: .85rem; margin: 14px 0; }
+.or::before, .or::after { content: ''; flex: 1; height: 1px; background: var(--line); }

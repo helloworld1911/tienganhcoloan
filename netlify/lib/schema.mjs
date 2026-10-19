@@ -85,5 +85,20 @@ CREATE TABLE IF NOT EXISTS attempt_items (
   PRIMARY KEY (attempt_id, qid)
 );
 CREATE INDEX IF NOT EXISTS attempt_items_class_topic_idx ON attempt_items(class_id, topic);
-CREATE INDEX IF NOT EXISTS attempt_items_user_idx ON attempt_items(user_id, topic)
+CREATE INDEX IF NOT EXISTS attempt_items_user_idx ON attempt_items(user_id, topic);
+CREATE TABLE IF NOT EXISTS media (
+  id TEXT PRIMARY KEY,
+  name TEXT,
+  mime TEXT NOT NULL,
+  size BIGINT NOT NULL,
+  chunk_size INT NOT NULL,
+  chunks INT NOT NULL,
+  created_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_set BOOLEAN NOT NULL DEFAULT true;
+CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_idx ON users(google_sub) WHERE google_sub IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_idx ON users(lower(email)) WHERE email IS NOT NULL
 `;

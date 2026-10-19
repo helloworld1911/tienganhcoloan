@@ -47,9 +47,11 @@ export function escapeHtml(s) {
 /** Chỉ giữ thẻ định dạng an toàn. */
 export function cleanHtml(html) {
   return String(html || '')
+    // giữ ảnh (tranh trong đề nghe): chỉ giữ thuộc tính src an toàn
+    .replace(/<img\b[^>]*?\ssrc="((?:data:image\/[a-z+]+;base64,[^"]+)|(?:https:\/\/[^"]+))"[^>]*>/gi, '<img src="$1">')
     .replace(/<(\/?)(strong|b)>/gi, '<$1b>')
     .replace(/<(\/?)(em|i)>/gi, '<$1i>')
-    .replace(/<(?!\/?(u|b|i|sup|sub|br)\b)[^>]*>/gi, '')
+    .replace(/<(?!\/?(u|b|i|sup|sub|br)\b|img src=")[^>]*>/gi, '')
     .replace(/<(u|b|i|sup|sub)\s[^>]*>/gi, '<$1>')
     .replace(/<u>\s*<\/u>/g, '')
     .replace(/[ \t ]+/g, ' ')
@@ -86,7 +88,7 @@ export function htmlToBlocks(html) {
     for (const piece of inner.split(/<br\s*\/?>/i)) {
       const h = cleanHtml(piece);
       const t = stripTags(h);
-      if (t) blocks.push({ kind, text: t, html: h });
+      if (t || /<img /.test(h)) blocks.push({ kind, text: t, html: h });
     }
   };
   // đánh dấu <li> thuộc danh sách đánh số (ol) hay gạch đầu dòng (ul)
@@ -104,10 +106,10 @@ export function htmlToBlocks(html) {
         const cells = (row.match(/<t[dh]\b[^>]*>[\s\S]*?<\/t[dh]>/gi) || []).map((c) => {
           const inner = c.replace(/^<t[dh]\b[^>]*>|<\/t[dh]>$/gi, '');
           const paras = inner.match(/<p\b[^>]*>[\s\S]*?<\/p>/gi) || [inner];
-          const h = paras.map((p) => cleanHtml(p.replace(/<\/?p\b[^>]*>/gi, ''))).filter((x) => stripTags(x)).join('<br>');
+          const h = paras.map((p) => cleanHtml(p.replace(/<\/?p\b[^>]*>/gi, ''))).filter((x) => stripTags(x) || /<img /.test(x)).join('<br>');
           return { html: h, text: stripTags(h.replace(/<br>/g, '\n')).trim(), lines: paras.map((p) => stripTags(p)).filter(Boolean) };
         });
-        if (cells.some((c) => c.text)) {
+        if (cells.some((c) => c.text || /<img /.test(c.html))) {
           blocks.push({ kind: 'row', cells, text: cells.map((c) => c.text).filter(Boolean).join(' | '), html: cells.map((c) => c.html).join(' | ') });
         }
       }
@@ -267,9 +269,13 @@ export function parseExam(blocks, opts = {}) {
     let html = b.html.replace(/\\([.!_\-*])/g, '$1');
     if (KEY_HEAD_RE.test(text) && i > 5) break;          // phần đáp án nằm chung file
     if (END_RE.test(text)) { finishQ(); continue; }
+    // Lời thoại bài nghe trong file đáp án
+    if (opts.keyMode && part && /^(?:TRANSCRIPTS?|TAPESCRIPTS?|AUDIO ?SCRIPTS?|SCRIPT)\s*:?$/i.test(text)) { finishQ(); part._tr = []; continue; }
+    if (opts.keyMode && part?._tr && !SECTION_RE.test(text) && !SECTION_ALT_RE.test(text) && !PART_RE.test(text)) { part._tr.push(text); continue; }
     // hướng dẫn bị ngắt dòng (PDF): nối vào dòng hướng dẫn trước
     if (b.plain && part && !q && !part.questions.length && !part.passage.length && part.instruction && !/[.:?!)]\s*$/.test(part.instruction)
-        && !QNUM_RE.test(text) && !PART_RE.test(text) && !SECTION_ALT_RE.test(text) && !/^example/i.test(text)) {
+        && (!QNUM_RE.test(text) || /\b(?:to|and|or|from|questions?|numbers?|sentences?)\s*$/i.test(part.instruction))
+        && !PART_RE.test(text) && !SECTION_ALT_RE.test(text) && !/^example/i.test(text)) {
       part.instruction += ' ' + text; if (!part.points) part.points = ptsOf(part.instruction); continue;
     }
 
@@ -317,6 +323,18 @@ export function parseExam(blocks, opts = {}) {
       }
     }
 
+    // Câu chọn tranh: hàng ảnh + hàng chữ cái A B C ngay dưới câu hỏi
+    if (b.kind === 'row' && q && !q.options.length) {
+      const cells = b.cells.filter((c) => c.text || /<img /.test(c.html));
+      if (cells.length >= 2 && cells.every((c) => /<img /.test(c.html) && !c.text.replace(/^[A-H][.)]?$/, ''))) {
+        q._imgs = cells.map((c) => c.html.replace(/<br>/g, '')); continue;
+      }
+      const letters = cells.map((c) => c.text.replace(/[.)\s]/g, ''));
+      if (cells.length >= 2 && letters.every((l, k) => l === String.fromCharCode(65 + k))) {
+        q.options = letters.map((l, k) => ({ key: l, html: q._imgs?.[k] || '', ...(opts.keyMode && /<(b|u)>/.test(cells[k].html) ? { marked: true } : {}) }));
+        delete q._imgs; continue;
+      }
+    }
     if (b.kind === 'row') {
       // bảng trong đề (ví dụ bảng điền thông tin phần nghe)
       ensurePart();
@@ -345,6 +363,17 @@ export function parseExam(blocks, opts = {}) {
       continue;
     }
 
+    // Chỗ trống đánh số giữa dòng: "show on: 16. ______ evening" -> "(16) ______"
+    if (/[^\s\d][^\d]*?\b\d{1,3}\.\s*(?:[£$€]\s*)?[_…]{3,}/.test(text) && !QNUM_RE.test(text)) {
+      html = html.replace(/(^|[\s:])(\d{1,3})\.\s*((?:[£$€]\s*)?[_…]{3,})/g, '$1($2) $3');
+      text = stripTags(html);
+    }
+    // Câu ví dụ "0." -> đưa vào phần đề, không tính là câu hỏi
+    if (/^0\s*[.)]\s/.test(text) && part) { finishQ(); part.passage.push({ html: '<i>' + html + '</i>' }); continue; }
+    // Số câu không có dấu chấm: "12 Where does…" (khi đúng thứ tự câu tiếp theo)
+    if (!QNUM_RE.test(text) && part && (m = text.match(/^(\d{1,3})\s+([A-Z“"‘].{4,})$/)) && +m[1] === lastNum + 1) {
+      text = `${m[1]}. ${m[2]}`; html = html.replace(/^(\s*(?:<[^>]+>)*\s*\d{1,3})\s+/, '$1. ');
+    }
     // Câu hỏi có số
     if ((m = text.match(QNUM_RE)) && !/^\d{1,3}\s*[.):]\s*\d/.test(text)) {
       const num = +m[1];
@@ -353,7 +382,7 @@ export function parseExam(blocks, opts = {}) {
       continue;
     }
     // Danh sách tự đánh số của Word
-    if (b.kind === 'li' && part && !opts.keyMode && (part.questions.length || part.passage.length === 0)) {
+    if (b.kind === 'li' && part && (opts.keyMode ? blocks[i + 1]?.kind === 'row' : (part.questions.length || part.passage.length === 0))) {
       startQ(lastNum + 1, html); continue;
     }
 
@@ -468,6 +497,7 @@ export function parseExam(blocks, opts = {}) {
     p.passageHtml = renderPassage(p.passage);
     p.title = p.title || TOPICS[p.topic];
     p.instruction = p.instruction.replace(POINTS_RE, '').replace(/^[\s.:\-–)]+/, '').replace(/\s*\.\s*\.\s*$/, '.').replace(/\s+([.,])/g, '$1').trim();
+    if (p._tr) { p.transcript = p._tr.join('\n'); delete p._tr; }
     delete p.passage; delete p._raw;
   }
   exam.parts = exam.parts.filter((p) => p.questions.length);
@@ -664,10 +694,20 @@ function gapAnswerFromStem(examStem, keyStem) {
 }
 function gapAnswerFromPassage(raw, n) {
   const t = textOf(raw);
-  const m = t.match(new RegExp('\\(' + n + '\\)\\s*[_…]*\\s*([^_…()]+?)\\s*[_…]{2,}'));
+  // ưu tiên chữ nằm GIỮA hai dãy gạch: "(1) a ____ drama ____" -> "drama"
+  const m = t.match(new RegExp('\\(' + n + '\\)[^_…()]{0,25}?[_…]{2,}\\s*([^_…]+?)\\s*[_…]{2,}'))
+    || t.match(new RegExp('\\(' + n + '\\)\\s*[_…]*\\s*([^_…()]+?)\\s*[_…]{2,}'));
   if (m && m[1].trim()) return m[1].trim();
   const b = String(raw || '').match(new RegExp('\\(' + n + '\\)\\s*[_…]*\\s*<b>([^<]{1,60})</b>'));
   return b ? stripTags(b[1]).trim() : '';
+}
+function tfAnswerFrom(kq) {
+  const t = textOf(kq.stemHtml);
+  const m = t.match(/(?:^|[\s→=>:-])\(?(T|F|NG|True|False|Not given|Đúng|Sai)\)?\.?\s*$/i)
+    || String(kq.stemHtml).match(/<b>\s*\(?(T|F|NG|True|False)\)?\s*<\/b>/i);
+  if (!m) return '';
+  const v = m[1].toLowerCase();
+  return /^(t|true|đúng)$/.test(v) ? 'T' : /^(ng|not given)$/.test(v) ? 'NG' : 'F';
 }
 function mcqAnswerFrom(kq) {
   if (kq.keyLetter) return kq.keyLetter;
@@ -722,6 +762,7 @@ export function applyKeyDocument(exam, keyBlocks) {
   let count = 0;
   for (const [i, j] of pairs) {
     const ep = exam.parts[i], kp = key.parts[j];
+    if (kp.transcript && !ep.transcript) ep.transcript = kp.transcript.slice(0, 20000);
     // bài tìm từ thừa trong đoạn văn
     if (/extra word|unnecessary word|từ thừa/i.test(ep.instruction) && !ep.questions.some((x) => x.type !== 'essay')) {
       const qs = buildExtraWord(ep, kp);
@@ -742,7 +783,8 @@ export function applyKeyDocument(exam, keyBlocks) {
       const kq = kp.questions.find((x) => x.num === qn && !used.has(x));
       if (kq) used.add(kq);
       let ans = '';
-      if (q.type === 'mcq' || q.type === 'tf') ans = kq ? mcqAnswerFrom(kq) : '';
+      if (q.type === 'tf') ans = kq ? tfAnswerFrom(kq) : '';
+      else if (q.type === 'mcq') ans = kq ? mcqAnswerFrom(kq) : '';
       else if (q.type === 'gap') {
         if (textOf(q.stemHtml) && kq) ans = gapAnswerFromStem(q.stemHtml, kq.stemHtml);
         if (!ans) ans = gapAnswerFromPassage(kp.passageRaw, qn);
@@ -795,7 +837,7 @@ export function attachAnswerKey(exam, keyBlocks) {
 }
 
 // ======================================================= LỌC & HOÀN THIỆN
-export const DEFAULT_DROP = ['listening', 'writing'];
+export const DEFAULT_DROP = ['writing'];
 /**
  * Bỏ các dạng không phù hợp để học sinh tự luyện (mặc định: Nghe và Viết đoạn/thư tự luận),
  * đánh số lại câu hỏi liên tục nếu đề đánh số lại từ 1 ở mỗi phần, dọn dữ liệu tạm.
@@ -839,9 +881,11 @@ export function expandVariants(str) {
     let changed = false;
     for (const s of list) {
       const m = s.match(/(^|\s)([^\s/()]+)\s?\/\s?([^\s/()]+)(?=[\s.,!?]|$)/);
+      const suf = !m && s.match(/([A-Za-z])\(([a-z]{1,3})\)/);
+      if (suf) { changed = true; next.push(s.replace(suf[0], suf[1] + suf[2]), s.replace(suf[0], suf[1])); continue; }
       const o = !m && s.match(/\(([A-Za-z']{1,12})\)\s*/);
       if (m) { changed = true; next.push(s.slice(0, m.index) + m[1] + m[2] + s.slice(m.index + m[0].length), s.slice(0, m.index) + m[1] + m[3] + s.slice(m.index + m[0].length)); }
-      else if (o && o.index + o[0].length < s.length) { changed = true; next.push(s.replace(o[0], o[1] + ' '), s.replace(o[0], '')); }
+      else if (o && o[0].trim() !== s.trim()) { changed = true; next.push(s.replace(o[0], o[1] + ' '), s.replace(o[0], '')); }
       else next.push(s);
     }
     list = next.map((x) => x.replace(/\s+/g, ' ').trim());

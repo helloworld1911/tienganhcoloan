@@ -1,6 +1,6 @@
 // Điểm vào ứng dụng: định tuyến, khung giao diện, đăng nhập
-import { session, get, post } from './api.js';
-import { esc, toast, formData, $ } from './ui.js';
+import { session, get, post, del } from './api.js';
+import { esc, toast, formData, modal, googleButton, $ } from './ui.js';
 import * as admin from './admin.js';
 import * as editor from './editor.js';
 import * as student from './student.js';
@@ -133,8 +133,35 @@ async function loginView() {
     <form id="f"><label class="f">Tên đăng nhập<input name="username" autocomplete="username" required autofocus></label>
     <label class="f">Mật khẩu<input name="password" type="password" autocomplete="current-password" required></label>
     <button class="btn block accent">Đăng nhập</button></form>
+    <div class="or" id="gor" style="display:none">hoặc</div><div class="gbtn-wrap" id="gbtn"></div>
     <p class="small muted mt">Học sinh mới? <a href="#/register">Đăng ký bằng mã lớp</a></p>`);
   bindAuth('/auth/login');
+  googleButton($('#gbtn'), (credential) => googleLogin(credential)).then((ok) => { if (ok) $('#gor').style.display = ''; });
+}
+function finishLogin(r) {
+  session.set({ token: r.token });
+  state.user = null;
+  location.hash = r.user.role === 'student' ? '#/home' : '#/admin';
+}
+/** Đăng nhập Google; nếu Gmail chưa có tài khoản thì hỏi mã lớp để tạo tài khoản học sinh */
+async function googleLogin(credential, extra = {}) {
+  try {
+    finishLogin(await post('/auth/google', { credential, ...extra }));
+  } catch (e) {
+    if (!e.data?.needsRegister) { toast(e.message, 'err'); return; }
+    const d = e.data;
+    modal(`<h2>Tạo tài khoản học sinh</h2>
+      <p>Gmail <b>${esc(d.email)}</b> chưa có trong hệ thống. Nếu em là học sinh, nhập <b>mã lớp</b> thầy cô cho để tạo tài khoản.</p>
+      <p class="small muted">Thầy cô / học sinh đã có tài khoản: hãy đăng nhập bằng tên đăng nhập và mật khẩu, rồi vào <b>Tài khoản → Liên kết Gmail</b>.</p>
+      <form id="gf" class="form-grid"><label class="f">Mã lớp<input name="joinCode" required style="text-transform:uppercase;letter-spacing:.1em"></label>
+      <label class="f">Họ và tên<input name="fullName" value="${esc(d.name || '')}" required></label></form>
+      <div class="actions"><button class="btn ghost" data-close>Huỷ</button><button class="btn accent" id="ok">Tạo tài khoản</button></div>`, {
+      onMount: (m, close) => m.querySelector('#ok').onclick = async () => {
+        const f = m.querySelector('#gf'); if (!f.reportValidity()) return;
+        try { finishLogin(await post('/auth/google', { credential, ...formData(f) })); close(); } catch (err) { toast(err.message, 'err'); }
+      },
+    });
+  }
 }
 function registerView() {
   authFrame(`<h2>Đăng ký học sinh</h2><p class="muted">Nhập <b>mã lớp</b> do thầy cô cung cấp.</p>
@@ -143,8 +170,14 @@ function registerView() {
     <label class="f">Tên đăng nhập<input name="username" required pattern="[A-Za-z0-9._\\-]{3,40}" title="3–40 ký tự: chữ không dấu, số, . _ -"></label>
     <label class="f">Mật khẩu (ít nhất 6 ký tự)<input name="password" type="password" minlength="6" required></label>
     <button class="btn block accent">Tạo tài khoản</button></form>
+    <div class="or" id="gor" style="display:none">hoặc nhập mã lớp ở trên rồi</div><div class="gbtn-wrap" id="gbtn"></div>
     <p class="small muted mt">Đã có tài khoản? <a href="#/login">Đăng nhập</a></p>`);
   bindAuth('/auth/register');
+  googleButton($('#gbtn'), (credential) => {
+    const f = formData($('#f'));
+    if (!f.joinCode) { toast('Hãy nhập mã lớp trước khi đăng ký bằng Google', 'err'); return; }
+    googleLogin(credential, { joinCode: f.joinCode, fullName: f.fullName });
+  }, 'signup_with').then((ok) => { if (ok) $('#gor').style.display = ''; });
 }
 function setupView() {
   authFrame(`<h2>Thiết lập lần đầu</h2><p class="muted">Tạo tài khoản <b>quản trị viên</b> (chỉ làm một lần).</p>
@@ -161,22 +194,35 @@ function bindAuth(path) {
     btn.disabled = true;
     try {
       const r = await post(path, formData(e.target));
-      session.set({ token: r.token });
-      state.user = null;
-      location.hash = r.user.role === 'student' ? '#/home' : '#/admin';
+      finishLogin(r);
     } catch (err) { toast(err.message, 'err'); btn.disabled = false; }
   });
 }
-function accountView() {
-  const main = layout(`<div class="page-head"><div><h1>Tài khoản</h1><p>${esc(state.user.fullName)} · @${esc(state.user.username)}</p></div></div>
-    <div class="card" style="max-width:460px"><h3>Đổi mật khẩu</h3>
-    <form id="pw" class="form-grid"><label class="f">Mật khẩu hiện tại<input type="password" name="oldPassword" required></label>
-    <label class="f">Mật khẩu mới<input type="password" name="newPassword" minlength="6" required></label>
-    <button class="btn">Lưu</button></form></div>`);
+async function accountView() {
+  try { const me = await get('/me'); state.user = me.user; state.cls = me.class; } catch {}
+  const u = state.user;
+  const main = layout(`<div class="page-head"><div><h1>Tài khoản</h1><p>${esc(u.fullName)} · @${esc(u.username)}</p></div></div>
+    <div class="grid g2" style="max-width:920px">
+    <div class="card"><h3>Đăng nhập bằng Google (Gmail)</h3>
+      ${u.googleLinked ? `<p>✅ Đã liên kết với <b>${esc(u.email || '')}</b>. Em có thể bấm “Đăng nhập bằng Google” ở trang đăng nhập.</p>
+        <button class="btn ghost sm" id="unlink">Bỏ liên kết</button>`
+      : `<p class="muted">Liên kết Gmail để lần sau đăng nhập chỉ bằng một cú bấm.${u.email ? ` Gmail đã đăng ký: <b>${esc(u.email)}</b>.` : ''}</p><div class="gbtn-wrap" id="glink"></div><p class="small muted" id="gnone" style="display:none">Quản trị viên chưa bật đăng nhập Google (thiếu GOOGLE_CLIENT_ID).</p>`}
+    </div>
+    <div class="card"><h3>${u.passwordSet ? 'Đổi mật khẩu' : 'Đặt mật khẩu'}</h3>
+      ${u.passwordSet ? '' : '<p class="small muted">Tài khoản tạo bằng Google chưa có mật khẩu. Đặt mật khẩu để có thể đăng nhập bằng tên đăng nhập @' + esc(u.username) + '.</p>'}
+      <form id="pw" class="form-grid">${u.passwordSet ? '<label class="f">Mật khẩu hiện tại<input type="password" name="oldPassword" required></label>' : ''}
+      <label class="f">Mật khẩu mới<input type="password" name="newPassword" minlength="6" required></label>
+      <button class="btn">Lưu</button></form></div></div>`);
   main.querySelector('#pw').addEventListener('submit', async (e) => {
     e.preventDefault();
-    try { await post('/me/password', formData(e.target)); toast('Đã đổi mật khẩu', 'ok'); e.target.reset(); } catch (err) { toast(err.message, 'err'); }
+    try { await post('/me/password', formData(e.target)); toast('Đã lưu mật khẩu', 'ok'); accountView(); } catch (err) { toast(err.message, 'err'); }
   });
+  const gl = main.querySelector('#glink');
+  if (gl) googleButton(gl, async (credential) => {
+    try { await post('/me/google', { credential }); toast('Đã liên kết Gmail', 'ok'); accountView(); } catch (err) { toast(err.message, 'err'); }
+  }, 'continue_with').then((ok) => { if (!ok) main.querySelector('#gnone').style.display = ''; });
+  const ul = main.querySelector('#unlink');
+  if (ul) ul.onclick = async () => { try { await del('/me/google'); toast('Đã bỏ liên kết'); accountView(); } catch (err) { toast(err.message, 'err'); } };
 }
 
 window.addEventListener('hashchange', route);

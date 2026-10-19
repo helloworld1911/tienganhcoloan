@@ -11,15 +11,13 @@ const root = path.resolve(new URL('../public', import.meta.url).pathname);
 
 if (!process.env.DATABASE_URL && !process.env.NETLIFY_DB_URL) {
   const { PGlite } = await import('@electric-sql/pglite');
-  const { PGLiteSocketServer } = await import('@electric-sql/pglite-socket');
   const dir = process.env.LOCAL_DB_DIR || new URL('../.localdb', import.meta.url).pathname;
   const db = await PGlite.create(dir === 'memory' ? undefined : dir);
-  const srv = new PGLiteSocketServer({ db, port: 5544, host: '127.0.0.1' });
-  await srv.start();
-  process.env.DATABASE_URL = 'postgres://postgres:postgres@127.0.0.1:5544/postgres?sslmode=disable';
+  const { useLocalDb } = await import('../netlify/lib/db.mjs');
+  useLocalDb(db);
   process.env.JWT_SECRET ||= 'local-dev-secret';
-  process.env.DB_POOL_MAX = '1';
-  console.log('CSDL cục bộ:', dir);
+  process.env.MEDIA_DIR ||= (dir === 'memory' ? '/tmp/engweb-media' : dir + '-media');
+  console.log('CSDL cục bộ (PGlite):', dir);
 }
 const { default: api } = await import('../netlify/functions/api.mjs');
 

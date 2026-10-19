@@ -6,6 +6,13 @@ import { SCHEMA_SQL } from './schema.mjs';
 
 let pool = null;
 let schemaReady = null;
+let localDb = null; // PGlite chạy trong tiến trình (chỉ dùng khi chạy thử trên máy / kiểm thử)
+
+/** Dùng PGlite trực tiếp thay cho Postgres (npm run local, kiểm thử). */
+export function useLocalDb(db) {
+  localDb = db;
+  pool = { query: (t, p) => db.query(t, p), connect: async () => ({ query: (t, p) => db.query(t, p), release() {} }) };
+}
 
 function getPool() {
   if (pool) return pool;
@@ -47,6 +54,7 @@ export async function one(text, params = []) {
 
 /** Chạy nhiều câu lệnh trong một transaction. fn nhận client có .query */
 export async function tx(fn) {
+  if (localDb) return localDb.transaction(async (t) => fn({ q: async (x, p = []) => (await t.query(x, p)).rows }));
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');

@@ -76,7 +76,7 @@ export function totals(results) {
 export function stripAnswers(content) {
   return {
     ...content,
-    parts: (content.parts || []).map((p) => ({
+    parts: (content.parts || []).map(({ transcript, ...p }) => ({
       ...p,
       questions: (p.questions || []).map(({ answer, accepted, explanation, ...rest }) => rest),
     })),

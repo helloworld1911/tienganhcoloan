@@ -2,14 +2,12 @@
 import fs from 'node:fs';
 import mammoth from 'mammoth';
 import { PGlite } from '@electric-sql/pglite';
-import { PGLiteSocketServer } from '@electric-sql/pglite-socket';
 import { htmlToBlocks, parseExam, parseAnswerKey, applyAnswerKey } from '../public/js/parser.js';
 
 const db = await PGlite.create();
-const server = new PGLiteSocketServer({ db, port: 5544, host: '127.0.0.1' });
-await server.start();
-process.env.DATABASE_URL = 'postgres://postgres:postgres@127.0.0.1:5544/postgres?sslmode=disable';
+(await import('../netlify/lib/db.mjs')).useLocalDb(db);
 process.env.JWT_SECRET = 'test-secret';
+process.env.MEDIA_DIR = '/tmp/engweb-test-media';
 const { default: api } = await import('../netlify/functions/api.mjs');
 
 let token = null;
@@ -108,11 +106,62 @@ ok(ar.students.length === 2 && ar.items.length > 30, 'kết quả theo bài + ph
 const csv = await call('GET', `/export/class/${c6a.id}`);
 ok(csv.includes('Nguyễn An'), 'xuất CSV');
 
+// 6b. Giao bài trùng (bấm nhiều lần) chỉ tạo 1 bài
+const again = await call('POST', '/assignments', { examId: saved.id, classIds: [c6a.id], showAnswers: 'after_submit' });
+const all6a = (await call('GET', '/assignments')).filter((a) => a.class_id === c6a.id);
+ok(all6a.length === 1 && again[0].id === asg[0].id, 'giao trùng trong 2 phút không tạo bài mới');
+
+// 6c. File nghe: tải lên theo mảnh và phát lại theo Range
+const audio = new Uint8Array(7 * 1024 * 1024 + 123).map((_, i) => i % 251);
+const media = await call('POST', '/media', { name: 'test.mp3', size: audio.length, mime: 'audio/mpeg' });
+for (let n = 0; n < media.chunks; n++) {
+  const part = audio.slice(n * media.chunkSize, Math.min(audio.length, (n + 1) * media.chunkSize));
+  const res = await api(new Request('http://localhost/api/media/' + media.id + '/' + n, { method: 'PUT', headers: { 'content-type': 'application/octet-stream', authorization: 'Bearer ' + token }, body: part }));
+  if (!res.ok) throw new Error('upload ' + res.status + ' ' + await res.text());
+}
+const r1 = await api(new Request('http://localhost' + media.url, { headers: { range: 'bytes=3145700-' } }));
+const b1 = new Uint8Array(await r1.arrayBuffer());
+ok(r1.status === 206 && b1[0] === audio[3145700] && b1.length === media.chunkSize - 3145700, 'phát file nghe theo Range (206): ' + r1.headers.get('content-range'));
+const r2 = await api(new Request('http://localhost' + media.url, { headers: { range: 'bytes=7340000-' } }));
+const b2 = new Uint8Array(await r2.arrayBuffer());
+ok(r2.status === 206 && b2[b2.length - 1] === audio[audio.length - 1], 'đọc tới cuối file nghe');
+
+// 6d. Gmail cho học sinh + cấu hình Google
+const cfg = await call('GET', '/config', null, null);
+ok('googleClientId' in cfg, 'API cấu hình Google');
+await call('PUT', '/users/' + an.user.id, { email: 'An.Nguyen@Gmail.com' });
+const lst = await call('GET', '/users?role=student');
+ok(lst.find((u) => u.id === an.user.id).email === 'an.nguyen@gmail.com', 'gán Gmail cho học sinh');
+let gErr = null;
+try { await call('POST', '/auth/google', { credential: 'x' }, null); } catch (e) { gErr = e.message; }
+ok(/GOOGLE_CLIENT_ID|Google/.test(gErr || ''), 'đăng nhập Google báo rõ khi chưa cấu hình');
+
+// 6e. Đăng nhập Google (giả lập phản hồi tokeninfo của Google)
+process.env.GOOGLE_CLIENT_ID = 'cid.apps.googleusercontent.com';
+const realFetch = globalThis.fetch;
+let gUser = { email: 'an.nguyen@gmail.com', sub: 'g-111', name: 'An Nguyễn' };
+globalThis.fetch = async (url, o) => String(url).startsWith('https://oauth2.googleapis.com/tokeninfo')
+  ? new Response(JSON.stringify({ aud: process.env.GOOGLE_CLIENT_ID, iss: 'accounts.google.com', exp: String((Date.now() / 1000 + 3600) | 0), email_verified: 'true', ...gUser }))
+  : realFetch(url, o);
+const gl = await call('POST', '/auth/google', { credential: 'tok' }, null);
+ok(gl.user.id === an.user.id, 'đăng nhập Google bằng Gmail giáo viên đã gán cho học sinh');
+gUser = { email: 'moi.hocsinh@gmail.com', sub: 'g-222', name: 'Học Sinh Mới' };
+let need = null;
+try { await call('POST', '/auth/google', { credential: 'tok' }, null); } catch (e) { need = e.message; }
+ok(/needsRegister/.test(need || ''), 'Gmail lạ: yêu cầu nhập mã lớp');
+const gr = await call('POST', '/auth/google', { credential: 'tok', joinCode: c6a.join_code, fullName: 'Học Sinh Mới' }, null);
+ok(gr.user.classId === c6a.id && gr.user.username === 'moi.hocsinh' && !gr.user.passwordSet, 'tạo tài khoản học sinh bằng Google + mã lớp');
+await call('POST', '/me/password', { newPassword: 'abcdef' }, gr.token);
+ok((await call('POST', '/auth/login', { username: 'moi.hocsinh', password: 'abcdef' }, null)).token, 'học sinh Google đặt mật khẩu và đăng nhập thường được');
+gUser = { email: 'cogiao@gmail.com', sub: 'g-333', name: 'Cô Lan' };
+await call('POST', '/me/google', { credential: 'tok' }, admin.token);
+ok((await call('POST', '/auth/google', { credential: 'tok' }, null)).user.role === 'admin', 'giáo viên liên kết Gmail rồi đăng nhập bằng Google');
+globalThis.fetch = realFetch;
+
 // 7. Phân quyền
 let denied = false;
 try { await call('GET', '/classes', null, an.token); } catch { denied = true; }
 ok(denied, 'học sinh không gọi được API quản trị');
 
 console.log('\nTất cả kiểm thử API đều đạt ✔');
-await server.stop();
 process.exit(0);

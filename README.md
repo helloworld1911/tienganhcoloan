@@ -11,7 +11,9 @@ Chạy trên **Netlify** (trang tĩnh + Netlify Functions) với **Postgres** (N
 **Giáo viên / quản trị**
 - Tải lên file đề `.docx` / `.pdf` / `.txt` (hoặc dán văn bản) và file đáp án riêng – hoặc đáp án nằm cuối file đề dưới tiêu đề “ĐÁP ÁN / KEY”.
 - File đáp án có thể là **danh sách** (`1. B  2. C …`) hoặc **bản sao của đề** (phương án đúng in đậm, đáp án ghi trong chỗ trống, câu viết lại ghi đủ sau “→”, kèm giải thích bên dưới) – hệ thống tự nhận dạng và lấy luôn **lời giải thích** cho từng câu.
-- **Mặc định bỏ phần Nghe và phần Viết đoạn văn/viết thư** (tự luận) khi quét đề, chỉ giữ các dạng chấm tự động để học sinh tự luyện (bỏ chọn nếu muốn giữ). Đề đã lưu có nút “✂️ Bỏ phần Nghe & Viết”.
+- **Phần Nghe**: giữ nguyên khi quét (trắc nghiệm, Đúng/Sai, điền bảng, **chọn tranh A/B/C** – tranh được giữ), lời thoại (transcript) trong file đáp án hiện cho học sinh sau khi nộp. **Tải file nghe** (mp3/m4a/wav, tới 80MB) lên ngay trong màn hình sửa đề – một file chung cho cả đề hoặc riêng từng phần; lưu trên Netlify Blobs, không cần cấu hình thêm.
+- Mặc định bỏ phần **Viết đoạn văn / viết thư** (tự luận) khi quét đề; có thể bỏ chọn để giữ lại.
+- **Đăng nhập bằng Google (Gmail)**: học sinh mới bấm nút Google + nhập mã lớp; giáo viên có thể điền sẵn Gmail cho học sinh; ai đã có tài khoản thì vào *Tài khoản → Liên kết Gmail*.
 - Hỗ trợ đề đánh số lại từ 1 ở mỗi Part (tự đánh số liên tục), dạng ghép đoạn (A. Jeanne / B. Laura…), tìm từ thừa trong đoạn văn, tìm lỗi sai.
 - Tự quét đề thành các **chuyên đề**: Nghe hiểu, Phát âm, Trọng âm, Trắc nghiệm từ vựng–ngữ pháp, Giao tiếp, Đồng nghĩa–trái nghĩa, Chia động từ, Giới từ, Từ loại, Tìm lỗi sai, Đọc điền từ, Đọc hiểu, Viết lại câu, Sắp xếp/dựng câu, Viết đoạn/thư.
 - Màn hình **kiểm tra kết quả quét**: sửa dạng bài, câu hỏi, phương án, đáp án (nhiều đáp án đúng), giải thích, điểm từng câu; câu thiếu đáp án được tô vàng; gắn link file nghe (mp3 / Google Drive).
@@ -88,7 +90,18 @@ Chạy kiểm thử: `npm test`. Thử với đề thật của bạn: `npm run 
 | `DATABASE_URL` | chuỗi kết nối Neon ở bước 1 |
 | `JWT_SECRET` | chuỗi ngẫu nhiên dài ≥ 32 ký tự (khoá bảo vệ đăng nhập) |
 
+| `GOOGLE_CLIENT_ID` | *(không bắt buộc)* để bật nút **Đăng nhập bằng Google** – xem mục dưới |
+
 Sau đó **Deploys → Trigger deploy → Deploy site** (biến môi trường chỉ có hiệu lực sau khi deploy lại).
+
+### Bật đăng nhập bằng Google (Gmail)
+1. Vào https://console.cloud.google.com → tạo project (vd. `tienganhcoloan`).
+2. **APIs & Services → OAuth consent screen**: chọn *External*, điền tên app, email hỗ trợ → lưu. Ở mục *Audience* bấm **Publish app** (để mọi Gmail đăng nhập được, không cần thêm từng người làm “test user”).
+3. **APIs & Services → Credentials → Create credentials → OAuth client ID** → loại **Web application**.
+   - *Authorized JavaScript origins*: `https://<tên-site>.netlify.app` (và `http://localhost:8888` nếu chạy thử trên máy).
+   - Không cần điền *Redirect URIs*.
+4. Copy **Client ID** (dạng `xxxx.apps.googleusercontent.com`) → thêm biến `GOOGLE_CLIENT_ID` trên Netlify → Trigger deploy.
+Nút “Đăng nhập bằng Google” sẽ tự xuất hiện ở trang đăng nhập.
 
 ### Bước 5 – Khởi tạo
 Mở địa chỉ `https://<tên-site>.netlify.app` → màn hình **Thiết lập lần đầu** → tạo tài khoản quản trị (**làm ngay**, người đầu tiên vào sẽ thành admin). Kiểm tra trên Neon → *Tables* sẽ thấy 6 bảng: `classes, users, exams, assignments, attempts, attempt_items`.

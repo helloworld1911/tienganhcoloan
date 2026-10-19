@@ -17,10 +17,17 @@ export async function api(path, { method = 'GET', body, raw = false } = {}) {
   let data = null;
   try { data = await res.json(); } catch { /* bỏ qua */ }
   if (res.status === 401 && s) { session.clear(); location.hash = '#/login'; }
-  if (!res.ok) throw new Error(data?.error || `Lỗi ${res.status}`);
+  if (!res.ok) { const err = new Error(data?.error || `Lỗi ${res.status}`); err.status = res.status; err.data = data; throw err; }
   return data;
 }
 export const get = (p) => api(p);
+/** Gửi dữ liệu nhị phân (mảnh file nghe) */
+export async function upload(path, blob) {
+  const s = session.get();
+  const res = await fetch('/api' + path, { method: 'PUT', headers: { 'content-type': 'application/octet-stream', ...(s?.token ? { authorization: 'Bearer ' + s.token } : {}) }, body: blob });
+  if (!res.ok) { let m = 'Lỗi ' + res.status; try { m = (await res.json()).error || m; } catch {} throw new Error(m); }
+  return res.json();
+}
 export const post = (p, body = {}) => api(p, { method: 'POST', body });
 export const put = (p, body = {}) => api(p, { method: 'PUT', body });
 export const del = (p) => api(p, { method: 'DELETE' });

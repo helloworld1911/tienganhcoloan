@@ -48,6 +48,17 @@ export function modal(html, { wide = false, onMount } = {}) {
     bg.addEventListener('mousedown', (e) => { if (e.target === bg) close(null); });
     bg.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => close(null)));
     onMount && onMount(bg.firstElementChild, close);
+    // Chống bấm nhiều lần: khoá nút xác nhận cho tới khi xử lý xong
+    const ok = bg.querySelector('#ok');
+    if (ok && ok.onclick) {
+      const fn = ok.onclick;
+      ok.onclick = async (ev) => {
+        if (ok.dataset.busy) return;
+        ok.dataset.busy = '1'; ok.disabled = true;
+        const label = ok.innerHTML; ok.innerHTML = '<span class="spinner"></span> Đang xử lý…';
+        try { await fn.call(ok, ev); } finally { delete ok.dataset.busy; ok.disabled = false; if (ok.isConnected) ok.innerHTML = label; }
+      };
+    }
   });
 }
 export function confirmBox(msg, { ok = 'Đồng ý', danger = false } = {}) {
@@ -98,3 +109,30 @@ export function driveAudio(url) {
   return m ? `https://drive.google.com/uc?export=download&id=${m[1]}` : url;
 }
 export function debounce(fn, ms) { let t; const d = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; d.cancel = () => clearTimeout(t); return d; }
+
+// ---------------------------------------------------------------- Google Sign-In
+let gcfg = null, gis = null;
+export async function googleClientId() {
+  if (gcfg === null) { try { gcfg = (await (await fetch('/api/config')).json()).googleClientId || ''; } catch { gcfg = ''; } }
+  return gcfg;
+}
+function loadGis() {
+  gis ??= new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://accounts.google.com/gsi/client'; s.async = true;
+    s.onload = () => res(window.google); s.onerror = () => { gis = null; rej(new Error('Không tải được Google Sign-In')); };
+    document.head.appendChild(s);
+  });
+  return gis;
+}
+/** Vẽ nút Google vào el. onCredential nhận chuỗi credential. Trả về false nếu chưa cấu hình. */
+export async function googleButton(el, onCredential, text = 'signin_with') {
+  const cid = await googleClientId();
+  if (!cid || !el) return false;
+  try {
+    const g = await loadGis();
+    g.accounts.id.initialize({ client_id: cid, callback: (r) => onCredential(r.credential), ux_mode: 'popup' });
+    g.accounts.id.renderButton(el, { theme: 'outline', size: 'large', text, shape: 'pill', width: Math.min(320, el.clientWidth || 300), locale: 'vi' });
+    return true;
+  } catch { return false; }
+}
