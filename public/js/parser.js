@@ -326,7 +326,14 @@ export function parseExam(blocks, opts = {}) {
     }
 
     // Dòng chỉ có "A B C D" (dạng tìm lỗi sai)
-    if (LETTERS_ONLY_RE.test(text)) { if (q) q._errorLetters = true; continue; }
+    if (LETTERS_ONLY_RE.test(text)) {
+      if (q) {
+        q._errorLetters = true;
+        const bl = html.match(/<(?:b|u)>\s*\(?([A-D])\)?\s*<\/(?:b|u)>/);  // đáp án in đậm trên dòng A B C D
+        if (bl) q.keyLetter = bl[1];
+      }
+      continue;
+    }
 
     // Mũi tên viết lại câu
     if ((m = text.match(ARROW_RE))) {
@@ -663,8 +670,16 @@ function gapAnswerFromPassage(raw, n) {
   return b ? stripTags(b[1]).trim() : '';
 }
 function mcqAnswerFrom(kq) {
+  if (kq.keyLetter) return kq.keyLetter;
   const marked = kq.options.filter((o) => o.marked);
   if (marked.length === 1) return marked[0].key;
+  // tìm lỗi sai: dòng giải thích "regularly => regular" -> chọn phương án gạch chân "regularly"
+  const fix = (kq.notes || []).map((l) => l.replace(/^\s*[-–•]\s*/, '').match(/^(.{1,40}?)\s*(?:=>|→|->|⇒)/)).find(Boolean);
+  if (fix && kq.options.some((o) => stripTags(o.html))) {
+    const w = fix[1].split(/[+(]/)[0].trim().toLowerCase();
+    const hit = kq.options.filter((o) => stripTags(o.html).toLowerCase() === w);
+    if (hit.length === 1) return hit[0].key;
+  }
   const t = textOf(kq.stemHtml);
   let m = t.match(/[-–:→=]\s*>?\s*\(?([A-H])\)?\s*$/) || String(kq.stemHtml).match(/<b>\s*([A-H])\s*<\/b>\s*$/);
   if (m) return m[1];
@@ -732,10 +747,9 @@ export function applyKeyDocument(exam, keyBlocks) {
         if (textOf(q.stemHtml) && kq) ans = gapAnswerFromStem(q.stemHtml, kq.stemHtml);
         if (!ans) ans = gapAnswerFromPassage(kp.passageRaw, qn);
       } else if (q.type === 'rewrite' && kq) {
-        const lead = (q.lead || '').split(/_{2,}/)[0].trim().toLowerCase().replace(/[’`]/g, "'");
-        const kl = (kq.lead || '').replace(/[’`]/g, "'");
-        if (kq.lead && kq.lead.length > (q.lead || '').replace(/_{2,}/g, '').trim().length && (!lead || kl.toLowerCase().startsWith(lead))) ans = kq.lead;
-        else if (kq.notes?.length && /^(→|->|=>)/.test(kq.notes[0])) ans = kq.notes[0].replace(/^(→|->|=>)\s*/, '');
+        const full = kq.lead || (kq.notes?.length && /^(→|->|=>)/.test(kq.notes[0]) ? kq.notes[0].replace(/^(→|->|=>)\s*/, '') : '');
+        const al = full && alignLead(q.lead || '', full);
+        if (al) { ans = full; if (al.lead !== undefined) q.lead = al.lead; }
       }
       const exLines = [];
       if (kq) {
@@ -811,7 +825,7 @@ export function finalizeExam(exam, { drop = DEFAULT_DROP } = {}) {
   for (const p of exam.parts) {
     delete p.passageRaw; delete p._matching;
     p.kind = p.questions[0]?.type || 'gap';
-    for (const q of p.questions) { delete q.notes; (q.options || []).forEach((o) => delete o.marked); }
+    for (const q of p.questions) { delete q.notes; delete q.keyLetter; (q.options || []).forEach((o) => delete o.marked); }
   }
   exam.parts.forEach((p, i) => { p.id = `p${i + 1}`; p.questions.forEach((x, j) => { x.id = `${p.id}q${j + 1}`; }); });
   return removed;
@@ -834,4 +848,38 @@ export function expandVariants(str) {
     if (!changed) break;
   }
   return list;
+}
+
+/**
+ * So khớp phần đầu cho sẵn của đề ("I a long time." – chỗ trống bị mất khi đọc file)
+ * với câu đáp án đầy đủ ("I haven't seen him for a long time.").
+ * Trả về null nếu không khớp; nếu khớp và chỉ có đúng 1 chỗ trống thì dựng lại lead có "___".
+ */
+export function alignLead(lead, full) {
+  const norm = (w) => w.toLowerCase().replace(/[’`]/g, "'").replace(/[^a-z0-9']/g, '');
+  const lw = lead.replace(/_{2,}|…+|\.{3,}/g, ' ').split(/\s+/).filter((w) => norm(w));
+  const fw = full.split(/\s+/).filter(Boolean);
+  if (!lw.length) return { lead: undefined };
+  if (fw.length <= lw.length) return null;
+  // ghép tham lam theo thứ tự (dãy con)
+  const pos = [];
+  let j = 0;
+  for (const w of lw) {
+    while (j < fw.length && norm(fw[j]) !== norm(w)) j++;
+    if (j >= fw.length) return null;
+    pos.push(j++);
+  }
+  // các đoạn bị thiếu
+  const gaps = [];
+  let prev = -1;
+  for (const p of pos) { if (p > prev + 1) gaps.push([prev + 1, p]); prev = p; }
+  if (prev < fw.length - 1) gaps.push([prev + 1, fw.length]);
+  if (/_{2,}/.test(lead)) return { lead: undefined };       // đề đã có chỗ trống rõ ràng
+  if (gaps.length !== 1) return { lead: undefined };
+  const [a, b] = gaps[0];
+  if (b === fw.length) return { lead: undefined };          // trống ở cuối: giữ nguyên như đề
+  const punct = (fw[b - 1].match(/[,;:]$/) || [''])[0];      // giữ dấu phẩy ngay sau chỗ trống
+  const before = fw.slice(0, a).join(' ');
+  const after = fw.slice(b).join(' ');
+  return { lead: [before, '___' + punct, after].filter(Boolean).join(' ') };
 }
