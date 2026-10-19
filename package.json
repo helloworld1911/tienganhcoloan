@@ -1,0 +1,25 @@
+{
+  "name": "tienganhcoloan",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Web luyện bài tập tiếng Anh cho học sinh – Netlify + Netlify Database (Postgres)",
+  "scripts": {
+    "local": "node scripts/local-server.mjs",
+    "dev": "netlify dev",
+    "test": "node test/parser.test.mjs && node test/api.test.mjs",
+    "test:real": "node test/real.test.mjs"
+  },
+  "dependencies": {
+    "@netlify/database": "^2.0.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.0",
+    "@electric-sql/pglite-socket": "^0.0.10",
+    "mammoth": "^1.8.0",
+    "pdfjs-dist": "^4.10.38"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

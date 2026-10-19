@@ -1,0 +1,23 @@
+# Cấu hình Netlify – không cần bước build, chỉ cài thư viện cho Functions
+[build]
+  publish = "public"
+  command = "echo 'Không cần build'"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+# Bộ đệm cho thư viện tĩnh
+[[headers]]
+  for = "/vendor/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"

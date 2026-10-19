@@ -1,0 +1,5 @@
+node_modules/
+.localdb/
+.netlify/
+.env
+test/real/

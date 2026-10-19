@@ -1,0 +1,837 @@
+// ============================================================================
+//  Bộ phân tích đề tiếng Anh (chạy được cả trên trình duyệt lẫn Node)
+//  Đầu vào: HTML do mammoth sinh ra từ .docx, hoặc văn bản thuần (PDF/TXT)
+//  Đầu ra: { title, grade, timeLimit, parts:[{ section, title, instruction,
+//            topic, kind, points, passage, audioUrl, questions:[...] }] }
+// ============================================================================
+
+export const TOPICS = {
+  listening: 'Nghe hiểu',
+  pronunciation: 'Phát âm',
+  stress: 'Trọng âm',
+  vocabulary_grammar: 'Trắc nghiệm từ vựng – ngữ pháp',
+  communication: 'Giao tiếp – tình huống',
+  synonym_antonym: 'Đồng nghĩa – trái nghĩa',
+  verb_form: 'Chia động từ',
+  preposition: 'Giới từ',
+  word_form: 'Từ loại (word form)',
+  error_identification: 'Tìm lỗi sai',
+  reading_cloze: 'Đọc điền từ',
+  reading_comprehension: 'Đọc hiểu',
+  sentence_transformation: 'Viết lại câu',
+  sentence_building: 'Sắp xếp / dựng câu',
+  writing: 'Viết đoạn / thư',
+  other: 'Dạng khác',
+};
+
+export const QTYPES = {
+  mcq: 'Trắc nghiệm',
+  tf: 'Đúng / Sai',
+  gap: 'Điền từ',
+  rewrite: 'Viết câu',
+  essay: 'Tự luận (giáo viên chấm)',
+};
+
+// ---------------------------------------------------------------- tiện ích
+const ENT = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'", '&nbsp;': ' ' };
+export function decode(s) {
+  return String(s || '').replace(/&(amp|lt|gt|quot|#39|nbsp);/g, (m) => ENT[m])
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n));
+}
+export function stripTags(html) {
+  return decode(String(html || '').replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, '')).replace(/[ \t ]+/g, ' ').trim();
+}
+export function escapeHtml(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+/** Chỉ giữ thẻ định dạng an toàn. */
+export function cleanHtml(html) {
+  return String(html || '')
+    .replace(/<(\/?)(strong|b)>/gi, '<$1b>')
+    .replace(/<(\/?)(em|i)>/gi, '<$1i>')
+    .replace(/<(?!\/?(u|b|i|sup|sub|br)\b)[^>]*>/gi, '')
+    .replace(/<(u|b|i|sup|sub)\s[^>]*>/gi, '<$1>')
+    .replace(/<u>\s*<\/u>/g, '')
+    .replace(/[ \t ]+/g, ' ')
+    .trim();
+}
+/** Bỏ thẻ mở/đóng bị lẻ (sau khi cắt chuỗi HTML). */
+export function balanceTags(html) {
+  const out = [];
+  const stack = [];
+  const parts = String(html || '').split(/(<\/?(?:u|b|i|sup|sub)>)/i);
+  for (const t of parts) {
+    const m = t.match(/^<(\/?)(u|b|i|sup|sub)>$/i);
+    if (!m) { out.push(t); continue; }
+    const tag = m[2].toLowerCase();
+    if (!m[1]) { stack.push({ tag, idx: out.length }); out.push(t); continue; }
+    const k = stack.map((x) => x.tag).lastIndexOf(tag);
+    if (k < 0) continue; // thẻ đóng lẻ
+    while (stack.length > k + 1) out[stack.pop().idx] = '';
+    stack.pop(); out.push(t);
+  }
+  for (const x of stack) out[x.idx] = '';
+  return out.join('').replace(/<(u|b|i)>\s*<\/\1>/g, '');
+}
+const trimHtml = (h) => h.replace(/^(\s|<br\s*\/?>)+|(\s|<br\s*\/?>)+$/gi, '');
+
+// ------------------------------------------------- HTML (mammoth) -> blocks
+/**
+ * blocks: [{ kind:'p'|'li'|'row', text, html, cells? }]
+ */
+export function htmlToBlocks(html) {
+  const blocks = [];
+  const pushPara = (inner, kind) => {
+    // tách theo <br> (xuống dòng mềm)
+    for (const piece of inner.split(/<br\s*\/?>/i)) {
+      const h = cleanHtml(piece);
+      const t = stripTags(h);
+      if (t) blocks.push({ kind, text: t, html: h });
+    }
+  };
+  // đánh dấu <li> thuộc danh sách đánh số (ol) hay gạch đầu dòng (ul)
+  const stack = [];
+  const src = String(html || '').replace(/\r/g, '').replace(/<(\/?)(ol|ul)\b[^>]*>|<li\b/gi, (m0, close, tag) => {
+    if (tag) { if (close) stack.pop(); else stack.push(tag.toLowerCase()); return m0; }
+    return `<li data-k="${stack[stack.length - 1] || 'ol'}"`;
+  });
+  const re = /<table[\s\S]*?<\/table>|<(p|h[1-6]|li)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  let m;
+  while ((m = re.exec(src))) {
+    if (m[0].toLowerCase().startsWith('<table')) {
+      const rows = m[0].match(/<tr[\s\S]*?<\/tr>/gi) || [];
+      for (const row of rows) {
+        const cells = (row.match(/<t[dh]\b[^>]*>[\s\S]*?<\/t[dh]>/gi) || []).map((c) => {
+          const inner = c.replace(/^<t[dh]\b[^>]*>|<\/t[dh]>$/gi, '');
+          const paras = inner.match(/<p\b[^>]*>[\s\S]*?<\/p>/gi) || [inner];
+          const h = paras.map((p) => cleanHtml(p.replace(/<\/?p\b[^>]*>/gi, ''))).filter((x) => stripTags(x)).join('<br>');
+          return { html: h, text: stripTags(h.replace(/<br>/g, '\n')).trim(), lines: paras.map((p) => stripTags(p)).filter(Boolean) };
+        });
+        if (cells.some((c) => c.text)) {
+          blocks.push({ kind: 'row', cells, text: cells.map((c) => c.text).filter(Boolean).join(' | '), html: cells.map((c) => c.html).join(' | ') });
+        }
+      }
+    } else {
+      const kind = m[1].toLowerCase() === 'li' ? (/data-k="ul"/.test(m[0].slice(0, 20)) ? 'uli' : 'li') : 'p';
+      pushPara(m[2], kind);
+    }
+  }
+  return blocks;
+}
+
+/**
+ * PDF -> blocks. pages: [[{ str, x, y, w, bold }]] (lấy từ pdf.js getTextContent + tên font).
+ * Giữ chữ in đậm thành <b> để nhận ra đáp án được tô đậm trong file đáp án PDF.
+ */
+export function pdfPagesToBlocks(pages) {
+  const blocks = [];
+  for (const items of pages) {
+    const lines = [];
+    for (const it of items) {
+      if (!it.str) continue;
+      let line = lines.find((l) => Math.abs(l.y - it.y) <= 3);
+      if (!line) { line = { y: it.y, items: [] }; lines.push(line); }
+      line.items.push(it);
+    }
+    lines.sort((a, b) => b.y - a.y);
+    for (const l of lines) {
+      l.items.sort((a, b) => a.x - b.x);
+      let text = '', html = '', end = null, boldOpen = false;
+      for (const it of l.items) {
+        let piece = it.str;
+        if (end != null && it.x - end > 2 && !text.endsWith(' ') && !piece.startsWith(' ')) piece = ' ' + piece;
+        const lead = piece.match(/^\s*/)[0];
+        const body = piece.slice(lead.length);
+        if (!!it.bold !== boldOpen && body.trim()) { html += lead + (it.bold ? '<b>' : '</b>'); boldOpen = !!it.bold; html += escapeHtml(body); }
+        else html += escapeHtml(piece);
+        text += piece; end = it.x + it.w;
+      }
+      if (boldOpen) html += '</b>';
+      text = text.replace(/[ \t\u00a0]+/g, ' ').trim();
+      html = html.replace(/[ \t\u00a0]+/g, ' ').replace(/<\/b>(\s*)<b>/g, '$1').trim();
+      if (text) blocks.push({ kind: 'p', text, html, plain: true });
+    }
+  }
+  return blocks;
+}
+
+/** Văn bản thuần (PDF, TXT, dán vào) -> blocks */
+export function textToBlocks(text) {
+  return String(text || '').replace(/\r/g, '').split('\n')
+    .map((l) => l.replace(/\\([.!_\-*])/g, '$1').replace(/[ \t ]+/g, ' ').trim())
+    .filter(Boolean)
+    .map((t) => ({ kind: 'p', text: t, html: escapeHtml(t), plain: true }));
+}
+
+// ------------------------------------------------------------- nhận dạng
+const SECTION_RE = /^(?:SECTION|PHẦN|PHAN|PAPER)\s+([IVXLC]+|\d+|[A-H])\b\s*[.:\-–]?\s*(.*)$/i;
+const SECTION_ALT_RE = /^(?:[A-H]|[IVX]{1,4})[.)]\s+([A-ZĐ][A-ZĐ&,\- ]{3,}[A-ZĐ])\s*(\(.*\))?\s*$/;
+const PART_RE = /^(?:PART|EXERCISE|TASK|BÀI|BAI|DẠNG|QUESTION|CÂU)\s+([IVXLC]+|\d+|[A-H])\s*(?:[.:\-–)]|(?=\(\s*\d))\s*(.*)$/i;
+const ROMAN_RE = /^([IVX]{1,5})\s*[.)\-–]\s+(.{8,})$/;
+const QNUM_RE = /^(?:Question|Câu|Cau|Q)?\s*(\d{1,3})\s*[.):]\s*(.*)$/i;
+const ARROW_RE = /^(?:→|->|=>|⇒|➝|➞|►)\s*(.*)$/;
+const LETTERS_ONLY_RE = /^\(?A\)?[\s.]+\(?B\)?[\s.]+\(?C\)?[\s.]+\(?D\)?\.?$/;
+const POINTS_RE = /\((\d+(?:[.,]\d+)?)\s*(?:pts?|points?|điểm|marks?)\)/i;
+const INSTRUCTION_RE = /^(?:Choose|Mark|Read|Complete|Fill|Give|Put|Rewrite|Re-write|Finish|Write|Find|Identify|Listen|Use|Supply|Rearrange|Reorder|Circle|Match|Decide|Underline|Combine|Select|Pick|Answer|Make|Change|Correct|Look|Chọn|Đọc|Viết|Điền|Hoàn thành|Sắp xếp|Nghe|Tìm|Khoanh)\b/i;
+const KEY_HEAD_RE = /^(?:ĐÁP ÁN|DAP AN|ANSWER KEYS?|KEYS?|HƯỚNG DẪN CHẤM|HUONG DAN CHAM)\b/i;
+const END_RE = /^[-–—_*\s]*(?:THE END|HẾT|-?\s*HẾT\s*-?)[-–—_*\s]*$/i;
+const GAP_IN_TEXT_RE = /\((\d{1,3})\)\s*(?:[_….]{2,})?|(?:[_….]{2,})\s*\((\d{1,3})\)/g;
+
+export function detectTopic(text, info = {}) {
+  const s = (text || '').toLowerCase();
+  if (/listen|nghe|recording|you will hear/.test(s)) return 'listening';
+  if (/stress|trọng âm/.test(s)) return 'stress';
+  if (/closest in meaning|opposite in meaning|synonym|antonym|đồng nghĩa|trái nghĩa/.test(s)) return 'synonym_antonym';
+  if (/pronounc|underlined part|phát âm|sound/.test(s) && !/mistake|error/.test(s)) return 'pronunciation';
+  if (/mistake|error|lỗi sai|incorrect|needs? correct|extra word|từ thừa/.test(s)) return 'error_identification';
+  if (/using the (?:given )?words|words? given to (?:make|complete|write)|sentence building|cues|sắp xếp|rearrange|reorder|in (?:the )?correct order|meaningful sentence|make (?:complete )?sentences/.test(s)) return 'sentence_building';
+  if (/same meaning|means? the same|second sentence|similar|rewrite|re-write|finish (?:each|the)|means? exactly|viết lại|beginning with|given word|word given|keyword|combine|join each pair/.test(s)) return 'sentence_transformation';
+  if (/write (?:an?|a short|your)?\s*(?:email|e-mail|letter|paragraph|essay|passage|reply|story|note)|about \d+\s*words|viết (?:đoạn|thư|bài)/.test(s)) return 'writing';
+  if (/verbs? (?:given )?in (?:brackets|parentheses)|correct (?:tense|form) of (?:the )?verb|tenses?|chia động từ/.test(s)) return 'verb_form';
+  if (/preposition|giới từ/.test(s)) return 'preposition';
+  if (/form of the words?|word in (?:block )?capitals|capital letters|word formation|từ loại|dạng đúng của từ/.test(s)) return 'word_form';
+  if (/\brespon(?:se|d|ses)\b|exchange|conversation|dialogue|giao tiếp|tình huống/.test(s)) return 'communication';
+  if (info.hasPassage && info.hasGaps) return 'reading_cloze';
+  if (/passage|read the (?:text|following)|\bread\b.{0,30}\b(?:texts?|articles?|emails?|letters?|advertisements?|notices?)\b|đọc/.test(s)) return info.hasGaps ? 'reading_cloze' : 'reading_comprehension';
+  if (/best completes|best option|choose the (?:word|best|correct)|trắc nghiệm/.test(s)) return 'vocabulary_grammar';
+  return info.hasOptions ? 'vocabulary_grammar' : 'other';
+}
+
+/** Tách "A. xxx B. yyy C. zzz D. ttt" (giữ HTML gạch chân). Trả về {before, options} hoặc null. */
+export function splitOptions(html, firstLetter = 'A') {
+  const re = /(^|[\s>(])([A-H])\s*[.)]\s+/g;
+  const marks = [];
+  let m;
+  while ((m = re.exec(html))) marks.push({ letter: m[2], start: m.index + m[1].length, end: re.lastIndex });
+  // tìm chuỗi A,B,C… liên tiếp theo thứ tự
+  for (let i = 0; i < marks.length; i++) {
+    if (marks[i].letter !== firstLetter) continue;
+    const seq = [marks[i]];
+    let expect = String.fromCharCode(firstLetter.charCodeAt(0) + 1);
+    for (let j = i + 1; j < marks.length; j++) {
+      if (marks[j].letter === expect) { seq.push(marks[j]); expect = String.fromCharCode(expect.charCodeAt(0) + 1); }
+    }
+    if (seq.length >= 2 || /^\s*$/.test(stripTags(html.slice(0, seq[0].start)))) {
+      const options = seq.map((s, k) => {
+        const raw = html.slice(s.end, k + 1 < seq.length ? seq[k + 1].start : undefined);
+        const prefix = html.slice(Math.max(0, s.start - 12), s.start);
+        // đáp án được in đậm / gạch chân cả phương án (dùng khi đọc file đáp án)
+        const marked = /<(b|u)>\s*(<(b|u)>\s*)?$/.test(prefix) || /^\s*<(b|u)>[^<]{1,80}<\/(b|u)>\s*$/.test(raw.replace(/<\/(b|u)>\s*<(b|u)>/g, ''));
+        return { key: s.letter, html: trimHtml(balanceTags(cleanHtml(raw))), ...(marked ? { marked: true } : {}) };
+      });
+      return { before: trimHtml(balanceTags(html.slice(0, seq[0].start))), options };
+    }
+  }
+  return null;
+}
+
+const ptsOf = (t) => { const m = (t || '').match(POINTS_RE); return m ? parseFloat(m[1].replace(',', '.')) : null; };
+
+/** Phân tích đề. */
+export function parseExam(blocks, opts = {}) {
+  const exam = { title: opts.fileName ? opts.fileName.replace(/\.[^.]+$/, '') : 'Đề bài mới', grade: null, timeLimit: null, parts: [] };
+  let section = '';
+  let part = null;
+  let q = null;
+  let lastNum = 0;
+  let headerDone = false;
+
+  const allText = blocks.slice(0, 15).map((b) => b.text).join('\n');
+  const g = allText.match(/(?:TIẾNG ANH|TIENG ANH|ENGLISH|LỚP|LOP|GRADE|KHỐI|ANH)\s*(\d{1,2})\b/i);
+  if (g && +g[1] >= 1 && +g[1] <= 12) exam.grade = +g[1];
+  const tl = allText.match(/(\d{2,3})\s*phút/i) || allText.match(/(\d{2,3})\s*minutes/i);
+  if (tl) exam.timeLimit = +tl[1];
+
+  const newPart = (title, instruction) => {
+    finishQ();
+    part = { section, title: title || '', instruction: instruction || '', points: ptsOf(instruction), passage: [], audioUrl: '', questions: [], _raw: [] };
+    exam.parts.push(part);
+  };
+  const ensurePart = () => { if (!part) newPart('', ''); };
+  const finishQ = () => { q = null; };
+  const startQ = (num, html) => {
+    ensurePart();
+    finishQ();
+    q = { num, stemHtml: '', lead: '', options: [], answer: '', accepted: [], explanation: '', notes: [] };
+    part.questions.push(q);
+    lastNum = num;
+    const sp = splitOptions(html);
+    if (sp && (sp.options.length >= 2) && (sp.before === '' || sp.options.length >= 3)) {
+      q.stemHtml = sp.before; q.options = sp.options;
+    } else q.stemHtml = trimHtml(balanceTags(html));
+  };
+
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    let text = b.text.replace(/\\([.!_\-*])/g, '$1');
+    let html = b.html.replace(/\\([.!_\-*])/g, '$1');
+    if (KEY_HEAD_RE.test(text) && i > 5) break;          // phần đáp án nằm chung file
+    if (END_RE.test(text)) { finishQ(); continue; }
+    // hướng dẫn bị ngắt dòng (PDF): nối vào dòng hướng dẫn trước
+    if (b.plain && part && !q && !part.questions.length && !part.passage.length && part.instruction && !/[.:?!)]\s*$/.test(part.instruction)
+        && !QNUM_RE.test(text) && !PART_RE.test(text) && !SECTION_ALT_RE.test(text) && !/^example/i.test(text)) {
+      part.instruction += ' ' + text; if (!part.points) part.points = ptsOf(part.instruction); continue;
+    }
+
+    // Bảng tiêu đề đầu đề thi
+    if (!headerDone && b.kind === 'row' && exam.parts.length === 0 && !part) {
+      const lines = b.cells.flatMap((c) => c.html.split(/<br\s*\/?>/i).map(stripTags)).filter(Boolean);
+      const titleLine = lines.find((l) => /ĐỀ THI|KIỂM TRA|KỲ THI|ĐỀ KHẢO SÁT|ĐỀ ÔN|TEST|EXAM/i.test(l));
+      if (titleLine && !opts.keepFileTitle) {
+        const subj = lines.find((l) => /^Môn( thi)?\s*:/i.test(l));
+        const year = lines.find((l) => /NĂM HỌC\s*\d{4}/i.test(l) && l !== titleLine);
+        exam.title = [titleLine.replace(/\s+/g, ' ').trim(), subj && subj.replace(/^Môn( thi)?\s*:\s*/i, ''), year].filter(Boolean).join(' – ');
+      }
+      continue;
+    }
+
+    let m;
+    if (/^\d{1,2}$/.test(text)) continue;                  // số trang (PDF)
+    if (((m = text.match(SECTION_RE)) && !/^PART\b/i.test(text)) || SECTION_ALT_RE.test(text)) {
+      headerDone = true; finishQ();
+      section = text; part = null;
+      continue;
+    }
+    if ((m = text.match(PART_RE)) && !(/^(?:CÂU|QUESTION)\s+\d/i.test(text) && QNUM_RE.test(text) && part)) {
+      headerDone = true;
+      newPart(text.match(/^\S+\s+[IVXLC\dA-H]+/i)[0], m[2] || text);
+      continue;
+    }
+    if ((m = text.match(ROMAN_RE)) && INSTRUCTION_RE.test(m[2])) {
+      headerDone = true; newPart(m[1], m[2]); continue;
+    }
+    // Phần đầu trang (trước SECTION/Part đầu tiên) -> lấy tiêu đề, bỏ qua
+    if (!headerDone && !part && !QNUM_RE.test(text) && !INSTRUCTION_RE.test(text)) {
+      if (/ĐỀ THI|KIỂM TRA|KỲ THI|ĐỀ KHẢO SÁT/i.test(text) && !opts.keepFileTitle && exam.title === (opts.fileName || '').replace(/\.[^.]+$/, '')) {
+        let t = text.slice(text.search(/ĐỀ THI|KIỂM TRA|KỲ THI|ĐỀ KHẢO SÁT/i)).trim();
+        const yr = !/NĂM HỌC/i.test(t) && allText.match(/NĂM HỌC\s*\d{4}\s*[-–]\s*\d{4}/i);
+        exam.title = yr ? `${t} – ${yr[0]}` : t;
+      }
+      continue;
+    }
+    // Dòng hướng dẫn không có nhãn "Part"
+    if (INSTRUCTION_RE.test(text) && text.length > 30 && !QNUM_RE.test(text) && (!part || part.questions.length > 0) && !ARROW_RE.test(text)
+        && (!opts.keyMode || /^\s*<b>/.test(html))) {
+      if (!(part && part.questions.length && /write|imagine/i.test(text) && false)) {
+        headerDone = true; newPart('', text); continue;
+      }
+    }
+
+    if (b.kind === 'row') {
+      // bảng trong đề (ví dụ bảng điền thông tin phần nghe)
+      ensurePart();
+      if (q && part.questions.length) finishQ();
+      part.passage.push({ row: b.cells.map((c) => c.html) });
+      continue;
+    }
+
+    // Dòng chỉ có "A B C D" (dạng tìm lỗi sai)
+    if (LETTERS_ONLY_RE.test(text)) { if (q) q._errorLetters = true; continue; }
+
+    // Mũi tên viết lại câu
+    if ((m = text.match(ARROW_RE))) {
+      if (q) {
+        let lead = stripTags(m[1]).replace(/_{2,}|…{2,}|\.{4,}/g, ' ___ ').replace(/\s+/g, ' ').trim();
+        if (/^(___\s*)*$/.test(lead)) lead = '';
+        if (opts.keyMode && q.lead) q.notes.push(text); else q.lead = lead;
+      }
+      continue;
+    }
+
+    // Câu hỏi có số
+    if ((m = text.match(QNUM_RE)) && !/^\d{1,3}\s*[.):]\s*\d/.test(text)) {
+      const num = +m[1];
+      const htmlRest = html.replace(/^\s*(?:<[^>]+>)*\s*(?:Question|Câu|Cau|Q)?\s*\d{1,3}\s*[.):]\s*/i, '');
+      startQ(num, htmlRest);
+      continue;
+    }
+    // Danh sách tự đánh số của Word
+    if (b.kind === 'li' && part && !opts.keyMode && (part.questions.length || part.passage.length === 0)) {
+      startQ(lastNum + 1, html); continue;
+    }
+
+    // PDF: phương án / đề câu bị ngắt sang dòng sau
+    if (q && b.plain && !/^[-–+•(]/.test(text) && !/\(\d{1,3}\)/.test(text) && text.length <= 80) {
+      const lastOpt = q.options[q.options.length - 1];
+      const nextLetter = String.fromCharCode(65 + q.options.length);
+      const isOptLine = splitOptions(html, nextLetter)?.before === '';
+      if (lastOpt && !isOptLine && !/[.?!)"”]\s*$/.test(stripTags(lastOpt.html)) && (!opts.keyMode || !q.notes.length)) {
+        lastOpt.html = /-$/.test(lastOpt.html) ? lastOpt.html + html : `${lastOpt.html} ${html}`; continue;
+      }
+      if (opts.keyMode && !q.options.length && !q.notes.length && !isOptLine && !/[.?!:]\s*$/.test(stripTags(q.stemHtml))) {
+        q.stemHtml += ' ' + html; continue;
+      }
+    }
+    // Dòng phương án nối tiếp câu hỏi
+    if (q) {
+      const nextLetter = String.fromCharCode(65 + q.options.length);
+      const sp = splitOptions(html, nextLetter);
+      if (sp && sp.before === '' && sp.options.length && b.kind !== 'uli') { q.options.push(...sp.options); continue; }
+      if (opts.keyMode) {
+        // trong file đáp án: các dòng sau câu hỏi là lời giải thích (trừ đoạn văn có chỗ trống)
+        if (!/\(\d{1,3}\)\s*[_…]{2,}/.test(text)) { q.notes.push(text); continue; }
+      } else if (!q.options.length && b.kind !== 'uli') { q.stemHtml += (q.stemHtml ? (b.plain ? ' ' : '<br>') : '') + html; continue; }
+    }
+    // Còn lại: đoạn văn / bài đọc / đề bài viết
+    ensurePart();
+    if (q) finishQ();
+    const last = part.passage[part.passage.length - 1];
+    if (b.plain && last && last.plain && last.len >= 60) { last.html += ' ' + html; last.len = text.length; }
+    else part.passage.push({ html, plain: !!b.plain, len: text.length });
+  }
+
+  // ---------------------------------------------------- hậu xử lý từng phần
+  let wId = 0;
+  for (const p of exam.parts) {
+    const passageText = p.passage.map((x) => x.row ? x.row.map(stripTags).join(' ') : stripTags(x.html)).join('\n');
+    // các chỗ trống được đánh số trong bài đọc / bảng
+    const gapNums = [];
+    let gm;
+    GAP_IN_TEXT_RE.lastIndex = 0;
+    while ((gm = GAP_IN_TEXT_RE.exec(passageText))) gapNums.push(+(gm[1] || gm[2]));
+    const qNums = new Set(p.questions.map((x) => x.num));
+    const missingGaps = gapNums.filter((n) => !qNums.has(n));
+    if (missingGaps.length) {
+      for (const n of missingGaps) p.questions.push({ num: n, stemHtml: '', lead: '', options: [], answer: '', accepted: [], explanation: '', _gap: true });
+      p.questions.sort((a, b) => a.num - b.num);
+    }
+    if (!p.points) p.points = ptsOf(passageText);
+    p.passageRaw = p.passage.map((x) => (x.row ? x.row.join(' | ') : x.html)).join('\n');
+    // Dạng ghép: các đoạn có tiêu đề "A. Jeanne", "B. Laura"… và câu hỏi không có phương án
+    const heads = p.passage.filter((x) => !x.row).map((x) => stripTags(x.html).match(/^([A-H])[.)]\s+([^.!?]{1,40})$/)).filter(Boolean);
+    const noOpt = p.questions.filter((x) => x.options.length === 0);
+    if (heads.length >= 2 && heads.every((h, k) => h[1] === String.fromCharCode(65 + k)) && noOpt.length >= 2 && noOpt.length >= p.questions.length / 2) {
+      for (const x of noOpt) x.options = heads.map((h) => ({ key: h[1], html: escapeHtml(h[2].trim()) }));
+      p._matching = true;
+    }
+    const hasOptions = p.questions.some((x) => x.options.length >= 2);
+    const info = { hasPassage: p.passage.length > 0 && passageText.length > 120, hasGaps: gapNums.length > 0, hasOptions };
+    const sectionTopic = detectTopic(p.section, info);
+    let topic = detectTopic(p.instruction, info);
+    if (topic === 'other' || (sectionTopic === 'listening')) topic = sectionTopic !== 'other' ? sectionTopic : topic;
+    if (topic === 'other') topic = detectTopic(p.instruction + ' ' + passageText, info);
+    if (p.questions.length === 0 && /write|viết/i.test(p.instruction + ' ' + passageText)) topic = 'writing';
+    if (topic === 'other' && p.questions.length === 0) topic = 'writing';
+    if (p._matching && !['listening'].includes(topic)) topic = 'reading_comprehension';
+    p.topic = topic;
+
+    const isTF = /true.*false|\(T\)|\bT\s*\/\s*F\b|đúng.*sai|not given/i.test(p.instruction);
+    // phân loại câu
+    for (const qq of p.questions) {
+      const stemText = stripTags(qq.stemHtml);
+      if (qq._errorLetters || (topic === 'error_identification' && qq.options.length === 0)) {
+        const us = [...qq.stemHtml.matchAll(/<u>([\s\S]*?)<\/u>/g)].map((x) => stripTags(x[1]));
+        qq.options = ['A', 'B', 'C', 'D'].map((k, i) => ({ key: k, html: us.length === 4 ? escapeHtml(us[i]) : '' }));
+        if (us.length === 4) {
+          let idx = 0; // gắn chữ cái lên phần gạch chân
+          qq.stemHtml = qq.stemHtml.replace(/<u>([\s\S]*?)<\/u>/g, (_, inner) => `<u>${inner}</u><sup class="mk">${'ABCD'[idx++]}</sup>`);
+        }
+        qq.type = 'mcq';
+      } else if (isTF) {
+        qq.type = 'tf';
+        qq.options = /not given/i.test(p.instruction)
+          ? [{ key: 'T', html: 'True' }, { key: 'F', html: 'False' }, { key: 'NG', html: 'Not Given' }]
+          : [{ key: 'T', html: 'True' }, { key: 'F', html: 'False' }];
+      } else if (qq.options.length >= 2) qq.type = 'mcq';
+      else if (topic === 'writing' && !qq._gap) qq.type = 'essay';
+      else if (topic === 'sentence_transformation' || topic === 'sentence_building' || qq.lead || (/→|=>/.test(stemText))) qq.type = 'rewrite';
+      else qq.type = 'gap';
+      if (qq.type === 'rewrite') {
+        const kw = stemText.match(/\(([A-Z][A-Z' -]{1,20})\)\s*$/);
+        if (kw) qq.keyword = kw[1].trim();
+      }
+      if (qq.type === 'gap') {
+        const w = stemText.match(/\(([A-Z][A-Z]{1,20})\)\s*\.?$/); // từ gốc dạng word form
+        if (w) qq.baseWord = w[1];
+      }
+      delete qq._errorLetters; delete qq._gap;
+      if (!opts.keyMode) { delete qq.notes; qq.options.forEach((o) => delete o.marked); }
+    }
+    // Phần không có câu hỏi -> bài viết tự luận
+    if (p.questions.length === 0 && (topic === 'writing' || passageText.length > 0 || p.instruction)) {
+      wId++;
+      p.questions.push({ num: null, label: `W${wId}`, type: 'essay', stemHtml: '', lead: '', options: [], answer: '', accepted: [], explanation: '' });
+    }
+    p.kind = p.questions.length ? p.questions[0].type : 'essay';
+    // điểm
+    const n = p.questions.length || 1;
+    const per = p.points ? Math.round((p.points / n) * 100) / 100 : 1;
+    p.questions.forEach((x) => { x.points = x.type === 'essay' && !p.points ? 10 : per; });
+    // bài đọc -> html
+    p.passageHtml = renderPassage(p.passage);
+    p.title = p.title || TOPICS[p.topic];
+    p.instruction = p.instruction.replace(POINTS_RE, '').replace(/^[\s.:\-–)]+/, '').replace(/\s*\.\s*\.\s*$/, '.').replace(/\s+([.,])/g, '$1').trim();
+    delete p.passage; delete p._raw;
+  }
+  exam.parts = exam.parts.filter((p) => p.questions.length);
+  exam.parts.forEach((p, i) => { p.id = `p${i + 1}`; p.questions.forEach((x, j) => { x.id = `${p.id}q${j + 1}`; }); });
+  return exam;
+}
+
+function renderPassage(items) {
+  let out = '';
+  let rows = [];
+  const flush = () => { if (rows.length) { out += `<table class="ptable">${rows.map((r) => `<tr>${r.map((c) => `<td>${gapify(c)}</td>`).join('')}</tr>`).join('')}</table>`; rows = []; } };
+  for (const it of items) {
+    if (it.row) rows.push(it.row);
+    else { flush(); out += `<p>${gapify(it.html)}</p>`; }
+  }
+  flush();
+  return out;
+}
+/** đánh dấu chỗ trống (56) ____ thành <span class="gap">(56)</span> */
+function gapify(html) {
+  return html.replace(/\((\d{1,3})\)\s*(?:[_….]{2,})?/g, '<span class="gap" data-n="$1">($1)</span>').replace(/(?:_{3,}|…{2,}|\.{5,})/g, '<span class="blank">______</span>');
+}
+
+// ------------------------------------------------------------------ ĐÁP ÁN
+/** Tách phần đáp án nằm chung trong file đề (nếu có). */
+export function splitEmbeddedKey(blocks) {
+  const idx = blocks.findIndex((b, i) => i > 5 && KEY_HEAD_RE.test(b.text));
+  if (idx < 0) return { exam: blocks, key: null };
+  return { exam: blocks.slice(0, idx), key: blocks.slice(idx) };
+}
+
+/**
+ * Đọc file đáp án -> Map(số câu -> chuỗi đáp án thô)
+ * Hỗ trợ: "1. B", "1-B", "Câu 1: B", "1. B 2. C 3. A" trên cùng dòng,
+ * bảng dọc (Câu | Đáp án) và bảng ngang (hàng số câu + hàng đáp án).
+ */
+export function parseAnswerKey(blocks, expected = null) {
+  const map = new Map();
+  const ok = (n) => !expected || expected.has(n);
+  const put = (n, v) => { v = String(v || '').trim(); if (ok(n) && v && !map.has(n)) map.set(n, v); };
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    if (b.kind === 'row') {
+      const cells = b.cells.map((c) => c.text.trim());
+      const nums = cells.map((c) => (/^(?:Câu|Question|Q)?\s*(\d{1,3})\s*[.:)]?$/i.exec(c) || [])[1]);
+      const numCount = nums.filter(Boolean).length;
+      const next = blocks[i + 1];
+      // bảng ngang: hàng này toàn số câu, hàng sau là đáp án
+      if (numCount >= 2 && numCount >= cells.length - 1 && next && next.kind === 'row' && next.cells.length === cells.length) {
+        next.cells.forEach((c, k) => { if (nums[k]) put(+nums[k], c.text); });
+        i++; continue;
+      }
+      // bảng dọc: cặp (số, đáp án) xen kẽ
+      let handled = false;
+      for (let k = 0; k + 1 < cells.length; k++) {
+        if (nums[k] && cells[k + 1] && !nums[k + 1]) { put(+nums[k], cells[k + 1]); handled = true; k++; }
+      }
+      if (handled) continue;
+      scanLine(b.text.replace(/\s*\|\s*/g, '  '), put);
+      continue;
+    }
+    if (SECTION_RE.test(b.text) || PART_RE.test(b.text) || KEY_HEAD_RE.test(b.text)) continue;
+    const next = blocks[i + 1];
+    // "1" xuống dòng "C" (bảng bị mất cấu trúc khi xuất văn bản)
+    if (/^\d{1,3}$/.test(b.text) && next && !/^\d{1,3}$/.test(next.text) && next.text.length < 60) { put(+b.text, next.text); i++; continue; }
+    // "1 2 3 4 5" xuống dòng "C A B B A"
+    if (/^(\d{1,3}\s+){1,}\d{1,3}$/.test(b.text) && next) {
+      const ns = b.text.split(/\s+/), vs = next.text.split(/\s+/);
+      if (ns.length === vs.length) { ns.forEach((n, k) => put(+n, vs[k])); i++; continue; }
+    }
+    scanLine(b.text, put);
+  }
+  return map;
+}
+function scanLine(text, put) {
+  text = text.replace(/\\([.!_\-*])/g, '$1');
+  const re = /(?:^|[\s,;])(?:Câu|Cau|Question|Q)?\s*(\d{1,3})\s*(?:[.):]|[-–](?!\d))\s*/gi;
+  const marks = [];
+  let m;
+  while ((m = re.exec(text))) {
+    // tránh nhận nhầm số trong nội dung như "7 a.m." hoặc "8.50"
+    if (/\d/.test(text[re.lastIndex] || '') && !/\s/.test(text[re.lastIndex - 1])) continue;
+    marks.push({ n: +m[1], s: m.index, e: re.lastIndex });
+  }
+  // chỉ giữ dãy số tăng dần
+  const seq = [];
+  for (const mk of marks) if (!seq.length || mk.n > seq[seq.length - 1].n) seq.push(mk);
+  seq.forEach((mk, k) => put(mk.n, text.slice(mk.e, k + 1 < seq.length ? seq[k + 1].s : undefined).replace(/[\s,;]+$/, '')));
+}
+
+/** Gắn đáp án vào đề. Trả về số câu đã gắn. */
+export function applyAnswerKey(exam, map) {
+  let count = 0;
+  for (const p of exam.parts) for (const q of p.questions) {
+    if (q.num == null || !map.has(q.num)) continue;
+    const raw = map.get(q.num).replace(/^[\s:→\-–]+/, '').trim();
+    Object.assign(q, interpretAnswer(q, raw));
+    count++;
+  }
+  return count;
+}
+
+export function interpretAnswer(q, raw) {
+  const out = { answer: '', accepted: [], explanation: q.explanation || '' };
+  if (q.type === 'mcq') {
+    const m = raw.match(/^\(?([A-H])\)?(?:[.):\s]|$)\s*([\s\S]*)$/);
+    if (m) {
+      out.answer = m[1];
+      let rest = m[2].trim();
+      const opt = q.options.find((o) => o.key === m[1]);
+      if (opt && rest && stripTags(opt.html) && rest.toLowerCase().startsWith(stripTags(opt.html).toLowerCase())) rest = rest.slice(stripTags(opt.html).length).trim();
+      rest = rest.replace(/^[(\-–:]\s*|\)$/g, '').trim();
+      if (rest) out.explanation = rest;
+    } else out.answer = raw.slice(0, 1).toUpperCase();
+  } else if (q.type === 'tf') {
+    const m = raw.match(/^(T|F|NG|True|False|Not Given|Đúng|Sai)\b\s*([\s\S]*)$/i);
+    const v = m ? m[1].toLowerCase() : raw.toLowerCase();
+    out.answer = /^(t|true|đúng)/.test(v) ? 'T' : /^(ng|not)/.test(v) ? 'NG' : 'F';
+    if (m && m[2].trim()) out.explanation = m[2].replace(/^[(\-–:]\s*|\)$/g, '').trim();
+  } else {
+    // text: tách các đáp án chấp nhận được
+    let main = raw;
+    const ex = main.match(/\s*(?:\((?:giải thích|vì|because|explain)[^)]*\)|(?:Giải thích|Explanation)\s*:.*)$/i);
+    if (ex) { out.explanation = ex[0].replace(/^\s*\(|\)$|^(?:\s*Giải thích|\s*Explanation)\s*:/gi, '').trim(); main = main.slice(0, ex.index); }
+    const parts = q.type === 'gap'
+      ? main.split(/\s*\/\s*|\s*\|\s*|\s+OR\s+|\s+hoặc\s+|\s*;\s*/i)
+      : main.split(/\s*\|\s*|\s+OR\s+|\s+hoặc\s+|\n/i);
+    let acc = parts.map((s) => s.replace(/^(?:→|->|=>)\s*/, '').trim()).filter(Boolean);
+    acc = [...new Set(acc.flatMap(expandVariants))].slice(0, 24);
+    out.answer = acc[0] || '';
+    out.accepted = acc;
+  }
+  return out;
+}
+
+/** Thống kê nhanh để hiển thị sau khi quét */
+export function summarize(exam) {
+  const byTopic = {};
+  let total = 0, withAns = 0, points = 0;
+  for (const p of exam.parts) for (const q of p.questions) {
+    total++; points += +q.points || 0;
+    if (q.answer || q.type === 'essay') withAns++;
+    byTopic[p.topic] = (byTopic[p.topic] || 0) + 1;
+  }
+  return { total, withAns, points: Math.round(points * 100) / 100, byTopic };
+}
+
+
+// ======================================================= ĐÁP ÁN DẠNG "BẢN SAO ĐỀ"
+// File đáp án là chính đề bài nhưng: phương án đúng in đậm/gạch chân, đáp án điền
+// ghi ngay vào chỗ trống, câu viết lại ghi đủ sau "→", kèm lời giải thích bên dưới.
+const normInstr = (s) => stripTags(s).toLowerCase().replace(/\(\s*\d+[.,]?\d*\s*(?:pts?|points?|điểm|marks?)\s*\)\.?/g, '').replace(/[^a-z0-9]/g, '').slice(0, 60);
+const textOf = (h) => stripTags(String(h || '').replace(/<br\s*\/?>/gi, ' '));
+
+function alignParts(exam, key) {
+  const pairs = new Map();
+  let j0 = 0;
+  exam.parts.forEach((p, i) => {
+    const a = normInstr(p.instruction);
+    if (a.length < 12) return;
+    for (let j = j0; j < key.parts.length; j++) {
+      const b = normInstr(key.parts[j].instruction);
+      if (b.length >= 12 && (a === b || a.startsWith(b) || b.startsWith(a))) { pairs.set(i, j); j0 = j + 1; return; }
+    }
+  });
+  return pairs;
+}
+
+function explanationFrom(lines) {
+  return lines.map((l) => l.replace(/^\s*[-–•]\s*/, '').trim())
+    .filter((l) => l && !/^(giải thích|explanation)\s*:?$/i.test(l) && !/^(transcript|tapescript)\b/i.test(l) && !/^\([A-Z][A-Z ]*\)\.?$/.test(l))
+    .join('\n').slice(0, 1500);
+}
+
+function gapAnswerFromStem(examStem, keyStem) {
+  const kt = textOf(keyStem);
+  const m = kt.match(/[_…]{2,}\s*([^_…]+?)\s*[_…]{2,}/);
+  if (m && m[1].trim()) return m[1].trim();
+  // so sánh phần trước/sau chỗ trống
+  const et = textOf(examStem);
+  const parts = et.split(/[_…]{3,}|\.{4,}/);
+  if (parts.length === 2) {
+    const pre = parts[0].trim(), post = parts[1].trim();
+    if (kt.startsWith(pre)) {
+      let mid = kt.slice(pre.length);
+      const k = post ? mid.lastIndexOf(post.slice(0, 15)) : mid.length;
+      if (k > 0) mid = mid.slice(0, k);
+      mid = mid.replace(/[_…]/g, '').trim();
+      if (mid && mid.length < 80) return mid;
+    }
+  }
+  const b = String(keyStem || '').match(/<b>([^<]{1,60})<\/b>/);
+  return b ? stripTags(b[1]) : '';
+}
+function gapAnswerFromPassage(raw, n) {
+  const t = textOf(raw);
+  const m = t.match(new RegExp('\\(' + n + '\\)\\s*[_…]*\\s*([^_…()]+?)\\s*[_…]{2,}'));
+  if (m && m[1].trim()) return m[1].trim();
+  const b = String(raw || '').match(new RegExp('\\(' + n + '\\)\\s*[_…]*\\s*<b>([^<]{1,60})</b>'));
+  return b ? stripTags(b[1]).trim() : '';
+}
+function mcqAnswerFrom(kq) {
+  const marked = kq.options.filter((o) => o.marked);
+  if (marked.length === 1) return marked[0].key;
+  const t = textOf(kq.stemHtml);
+  let m = t.match(/[-–:→=]\s*>?\s*\(?([A-H])\)?\s*$/) || String(kq.stemHtml).match(/<b>\s*([A-H])\s*<\/b>\s*$/);
+  if (m) return m[1];
+  for (const n of kq.notes || []) {
+    m = n.match(/(?:đáp án|answer|key|chọn)\s*(?:đúng)?\s*(?:là)?\s*[:\-]?\s*\(?([A-H])\)?(?:[.\s]|$)/i);
+    if (m) return m[1].toUpperCase();
+  }
+  return '';
+}
+
+/** Tạo câu hỏi "tìm từ thừa" từ bài đọc có từ thừa được đánh dấu trong đáp án. */
+function buildExtraWord(ep, kp) {
+  const markRe = /<b>\s*<u>([^<]{1,30})<\/u>\s*<\/b>|<u>\s*<b>([^<]{1,30})<\/b>\s*<\/u>/g;
+  const examMarks = [...String(ep.passageRaw || '').matchAll(markRe)].length;
+  const words = [];
+  const text = textOf(String(kp.passageRaw || '').replace(markRe, (m0, a, b) => { words.push((a || b).trim()); return ` ⟦${words.length - 1}⟧ `; }));
+  if (words.length <= examMarks) return null;
+  const qs = [];
+  for (let k = examMarks; k < words.length; k++) {
+    const pos = text.indexOf(`⟦${k}⟧`);
+    let a = pos, b = pos;
+    while (a > 0 && !/[.!?;,]/.test(text[a - 1])) a--;
+    while (b < text.length && !/[.!?;,]/.test(text[b])) b++;
+    const chunk = text.slice(a, Math.min(text.length, b + 1)).replace(/⟦(\d+)⟧/g, (_, i) => words[+i]).replace(/\s+/g, ' ').trim();
+    const n = qs.length + 1;
+    const kq = kp.questions.find((x) => x.num === n);
+    const expl = kq ? explanationFrom([textOf(kq.stemHtml), ...(kq.notes || [])]) : '';
+    qs.push({ num: n, type: 'gap', stemHtml: escapeHtml(chunk.charAt(0).toUpperCase() + chunk.slice(1)), lead: '', options: [], answer: words[k], accepted: [words[k]],
+      explanation: expl, points: 1 });
+  }
+  return qs;
+}
+
+/** Gắn đáp án từ file đáp án dạng bản sao đề. Trả về số câu đã gắn, hoặc -1 nếu file không phải dạng này. */
+export function applyKeyDocument(exam, keyBlocks) {
+  const key = parseExam(keyBlocks, { keyMode: true });
+  const pairs = alignParts(exam, key);
+  const withInstr = exam.parts.filter((p) => normInstr(p.instruction).length >= 12).length;
+  if (pairs.size < 2 || pairs.size < withInstr * 0.4) return -1;
+  let count = 0;
+  for (const [i, j] of pairs) {
+    const ep = exam.parts[i], kp = key.parts[j];
+    // bài tìm từ thừa trong đoạn văn
+    if (/extra word|unnecessary word|từ thừa/i.test(ep.instruction) && !ep.questions.some((x) => x.type !== 'essay')) {
+      const qs = buildExtraWord(ep, kp);
+      if (qs) {
+        ep.questions = qs; ep.topic = 'error_identification'; ep.kind = 'gap';
+        ep.instruction += ' (Mỗi câu dưới đây có MỘT từ thừa – hãy viết lại từ thừa đó.)';
+        ep.passageHtml = '';
+        const per = ep.points ? Math.round((ep.points / qs.length) * 100) / 100 : 1;
+        qs.forEach((x) => { x.points = per; });
+        count += qs.length;
+        continue;
+      }
+    }
+    const used = new Set();
+    for (const q of ep.questions) {
+      const qn = q.srcNum ?? q.num;
+      if (qn == null) continue;
+      const kq = kp.questions.find((x) => x.num === qn && !used.has(x));
+      if (kq) used.add(kq);
+      let ans = '';
+      if (q.type === 'mcq' || q.type === 'tf') ans = kq ? mcqAnswerFrom(kq) : '';
+      else if (q.type === 'gap') {
+        if (textOf(q.stemHtml) && kq) ans = gapAnswerFromStem(q.stemHtml, kq.stemHtml);
+        if (!ans) ans = gapAnswerFromPassage(kp.passageRaw, qn);
+      } else if (q.type === 'rewrite' && kq) {
+        const lead = (q.lead || '').split(/_{2,}/)[0].trim().toLowerCase().replace(/[’`]/g, "'");
+        const kl = (kq.lead || '').replace(/[’`]/g, "'");
+        if (kq.lead && kq.lead.length > (q.lead || '').replace(/_{2,}/g, '').trim().length && (!lead || kl.toLowerCase().startsWith(lead))) ans = kq.lead;
+        else if (kq.notes?.length && /^(→|->|=>)/.test(kq.notes[0])) ans = kq.notes[0].replace(/^(→|->|=>)\s*/, '');
+      }
+      const exLines = [];
+      if (kq) {
+        // câu điền chỗ trống trong đoạn văn: dòng "1. gets dressed: mặc đồ" chính là lời giải thích
+        if (!textOf(q.stemHtml) && textOf(kq.stemHtml) && !kq.options.length) exLines.push(textOf(kq.stemHtml));
+        exLines.push(...(kq.notes || []));
+      }
+      if (ans) { Object.assign(q, interpretAnswer(q, ans)); count++; }
+      const ex = explanationFrom(exLines);
+      if (ex) q.explanation = ex;
+    }
+  }
+  // Tìm lỗi sai nhưng file không giữ được gạch chân (PDF): đổi thành câu "viết từ đúng để sửa lỗi"
+  for (const [i, j] of pairs) {
+    const ep = exam.parts[i], kp = key.parts[j];
+    if (ep.topic !== 'error_identification') continue;
+    const blank = ep.questions.filter((q) => q.type === 'mcq' && q.options.length && q.options.every((o) => !stripTags(o.html)));
+    if (!blank.length) continue;
+    let changed = 0;
+    for (const q of blank) {
+      const kq = kp.questions.find((x) => x.num === (q.srcNum ?? q.num));
+      const fix = (kq?.notes || []).map((l) => l.replace(/^\s*[-–•]\s*/, '').match(/^(.{1,40}?)\s*(?:=>|→|->|⇒)\s*(.{1,60})$/)).find(Boolean);
+      if (!fix) continue;
+      const wrong = fix[1].split('+')[0].trim();
+      let right = fix[2].split(/\s*\(|\s+\+\s|\s+(?:vì|do|because)\s/)[0].trim();
+      const del = /^(bỏ|xoá|xóa|delete|omit|remove)(?=\s|$)/i.test(right);
+      q.type = 'gap'; q.options = [];
+      if (del) { q.answer = `bỏ ${wrong}`; q.accepted = [`bỏ ${wrong}`, `xoá ${wrong}`, `delete ${wrong}`, `${wrong} → bỏ`, wrong]; }
+      else { q.answer = right; q.accepted = [right, `${wrong} → ${right}`, `${wrong} -> ${right}`, `${wrong} => ${right}`, `${wrong} - ${right}`, `${wrong} sửa thành ${right}`]; }
+      changed++;
+    }
+    if (changed) { ep.instruction += ' (Viết từ/cụm từ đúng để sửa lỗi; nếu phải bỏ từ thì ghi “bỏ + từ”.)'; ep.kind = 'gap'; count += changed; }
+  }
+  return count;
+}
+
+/** Gắn đáp án: tự chọn dạng "bản sao đề" hoặc dạng danh sách "1. B  2. C". */
+export function attachAnswerKey(exam, keyBlocks) {
+  const n = applyKeyDocument(exam, keyBlocks);
+  if (n >= 0) return { mode: 'document', count: n };
+  const nums = new Set(exam.parts.flatMap((p) => p.questions.map((q) => q.num)).filter((x) => x != null));
+  return { mode: 'list', count: applyAnswerKey(exam, parseAnswerKey(keyBlocks, nums)) };
+}
+
+// ======================================================= LỌC & HOÀN THIỆN
+export const DEFAULT_DROP = ['listening', 'writing'];
+/**
+ * Bỏ các dạng không phù hợp để học sinh tự luyện (mặc định: Nghe và Viết đoạn/thư tự luận),
+ * đánh số lại câu hỏi liên tục nếu đề đánh số lại từ 1 ở mỗi phần, dọn dữ liệu tạm.
+ */
+export function finalizeExam(exam, { drop = DEFAULT_DROP } = {}) {
+  const dropSet = new Set(drop);
+  const removed = { parts: 0, questions: 0 };
+  exam.parts = exam.parts.filter((p) => {
+    if (dropSet.has(p.topic)) { removed.parts++; removed.questions += p.questions.length; return false; }
+    if (dropSet.has('writing')) {
+      const before = p.questions.length;
+      p.questions = p.questions.filter((q) => q.type !== 'essay');
+      removed.questions += before - p.questions.length;
+    }
+    if (!p.questions.length) { removed.parts++; return false; }
+    return true;
+  });
+  const nums = exam.parts.flatMap((p) => p.questions.map((q) => q.num)).filter((x) => x != null);
+  if (new Set(nums).size !== nums.length) {
+    let n = 0;
+    for (const p of exam.parts) {
+      const map = {};
+      for (const q of p.questions) { n++; if (q.num != null) { map[q.num] = n; q.srcNum ??= q.num; } q.num = n; delete q.label; }
+      if (p.passageHtml) p.passageHtml = p.passageHtml.replace(/<span class="gap" data-n="(\d+)">\(\d+\)<\/span>/g, (m0, k) => (map[k] ? `<span class="gap" data-n="${map[k]}">(${map[k]})</span>` : m0));
+    }
+  }
+  for (const p of exam.parts) {
+    delete p.passageRaw; delete p._matching;
+    p.kind = p.questions[0]?.type || 'gap';
+    for (const q of p.questions) { delete q.notes; (q.options || []).forEach((o) => delete o.marked); }
+  }
+  exam.parts.forEach((p, i) => { p.id = `p${i + 1}`; p.questions.forEach((x, j) => { x.id = `${p.id}q${j + 1}`; }); });
+  return removed;
+}
+
+/** "goes/ travels to work" -> ["goes to work","travels to work"]; "(to) beautify" -> ["to beautify","beautify"] */
+export function expandVariants(str) {
+  let list = [String(str).trim()];
+  for (let guard = 0; guard < 4; guard++) {
+    const next = [];
+    let changed = false;
+    for (const s of list) {
+      const m = s.match(/(^|\s)([^\s/()]+)\s?\/\s?([^\s/()]+)(?=[\s.,!?]|$)/);
+      const o = !m && s.match(/\(([A-Za-z']{1,12})\)\s*/);
+      if (m) { changed = true; next.push(s.slice(0, m.index) + m[1] + m[2] + s.slice(m.index + m[0].length), s.slice(0, m.index) + m[1] + m[3] + s.slice(m.index + m[0].length)); }
+      else if (o && o.index + o[0].length < s.length) { changed = true; next.push(s.replace(o[0], o[1] + ' '), s.replace(o[0], '')); }
+      else next.push(s);
+    }
+    list = next.map((x) => x.replace(/\s+/g, ' ').trim());
+    if (!changed) break;
+  }
+  return list;
+}
