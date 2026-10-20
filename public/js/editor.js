@@ -1,5 +1,5 @@
 // Ngân hàng đề: tải lên & quét đề, chỉnh sửa, giao bài
-import { get, post, put, del, upload } from './api.js';
+import { get, post, put, del, upload, session } from './api.js';
 import { layout } from './app.js';
 import { esc, toast, modal, confirmBox, formData, fmtDate, fmtAgo, pct, bar, topicLabel, $, $$ } from './ui.js';
 import { TOPICS, QTYPES, htmlToBlocks, textToBlocks, pdfPagesToBlocks, parseExam, attachAnswerKey, finalizeExam, splitEmbeddedKey, summarize, interpretAnswer, stripTags, cleanHtml } from './parser.js';
@@ -48,44 +48,64 @@ function shrinkImage(src) {
   });
 }
 
-/** Tải file nghe lên theo từng mảnh. onProgress(0..1). Trả về đường dẫn phát. */
+const MB = (b) => (b / 1024 / 1024).toFixed(1) + 'MB';
+/** Tải file nghe lên theo từng mảnh (tự nén trước cho nhẹ). onProgress(0..1, nhãn). Trả về { url, note }. */
 export async function uploadAudio(file, onProgress = () => {}) {
   if (!/^audio\//.test(file.type) && !/\.(mp3|m4a|wav|ogg|aac)$/i.test(file.name)) throw new Error('Hãy chọn file âm thanh (.mp3, .m4a, .wav, .ogg)');
   if (file.size > 80 * 1024 * 1024) throw new Error('File nghe phải nhỏ hơn 80MB');
-  const m = await post('/media', { name: file.name, size: file.size, mime: file.type || 'audio/mpeg' });
+  let send = file, note = '';
+  try {
+    const { compressAudio } = await import('./audio-compress.js');
+    const small = await compressAudio(file, (x) => onProgress(x * 0.6, 'Đang nén file nghe…'));
+    if (small) { send = small; note = `đã nén ${MB(file.size)} → ${MB(small.size)}`; }
+  } catch (e) { console.warn('Không nén được file nghe, tải bản gốc', e); }
+  const base = send === file ? 0 : 0.6;
+  const m = await post('/media', { name: send.name, size: send.size, mime: send.type || 'audio/mpeg' });
   for (let n = 0; n < m.chunks; n++) {
-    const blob = file.slice(n * m.chunkSize, Math.min(file.size, (n + 1) * m.chunkSize));
+    const blob = send.slice(n * m.chunkSize, Math.min(send.size, (n + 1) * m.chunkSize));
     let ok = false;
     for (let tries = 0; tries < 3 && !ok; tries++) {
       try { await upload(`/media/${m.id}/${n}`, blob); ok = true; } catch (e) { if (tries === 2) throw e; }
     }
-    onProgress((n + 1) / m.chunks);
+    onProgress(base + (1 - base) * ((n + 1) / m.chunks), 'Đang tải lên…');
   }
-  return m.url;
+  return { url: m.url, note };
 }
-/** Nhập file nghe từ link (Google Drive, Dropbox…) về máy chủ web để phát ổn định */
+/** Lấy file nghe từ link (Google Drive, Dropbox, mp3…) về trình duyệt qua máy chủ web, nén rồi lưu */
 export async function importAudioLink(link, onProgress = () => {}) {
   link = String(link || '').trim();
-  if (!link || link.startsWith('/api/media/')) return link;
-  const m = await post('/media/import', { url: link });
-  onProgress(0.02);
-  for (let n = 0; n < m.chunks; n++) {
-    let ok = false;
-    for (let tries = 0; tries < 3 && !ok; tries++) {
-      try { await post(`/media/${m.id}/fetch/${n}`); ok = true; } catch (e) { if (tries === 2) throw e; }
+  if (!link || link.startsWith('/api/media/')) return { url: link, note: '' };
+  const tok = session.get()?.token;
+  const parts = [];
+  let pos = 0, total = Infinity, name = '', type = 'audio/mpeg';
+  while (pos < total) {
+    let res, err;
+    for (let tries = 0; tries < 3; tries++) {
+      res = await fetch('/api/remote-audio?u=' + encodeURIComponent(link), { headers: { range: `bytes=${pos}-`, ...(tok ? { authorization: 'Bearer ' + tok } : {}) } });
+      if (res.ok) break;
+      err = 'Lỗi ' + res.status; try { err = (await res.json()).error || err; } catch {}
+      if (res.status === 400) break; // link sai / chưa chia sẻ: thử lại cũng vậy
     }
-    onProgress((n + 1) / m.chunks);
+    if (!res.ok) throw new Error(err);
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (!buf.length) break;
+    total = +(res.headers.get('content-range') || '').split('/')[1] || pos + buf.length;
+    name ||= decodeURIComponent(res.headers.get('x-file-name') || '');
+    type = res.headers.get('content-type') || type;
+    parts.push(buf); pos += buf.length;
+    onProgress(Math.min(1, pos / total) * 0.4, 'Đang lấy file từ link…');
   }
-  return m.url;
+  const file = new File(parts, name || 'file-nghe.mp3', { type: /^audio\//.test(type) ? type : 'audio/mpeg' });
+  return uploadAudio(file, (x, lab) => onProgress(0.4 + x * 0.6, lab));
 }
 /** Gắn xử lý cho các ô file nghe [data-audio] trong root. onSet(key, url) được gọi khi có file mới. */
 export function bindAudioInputs(root, onSet, pending = new Set()) {
   const run = async (box, job, label) => {
     const prog = box.querySelector('[data-aact="prog"]');
     const pick = box.querySelector('[data-aact="pick"]'); pick.disabled = true;
-    const p = job((x) => { prog.textContent = `${label} ${Math.round(x * 100)}%`; });
+    const p = job((x, lab) => { prog.textContent = `${lab || label} ${Math.round(x * 100)}%`; });
     pending.add(p);
-    try { const url = await p; onSet(box.dataset.audio, url); toast('Đã lưu file nghe lên máy chủ web', 'ok'); }
+    try { const { url, note } = await p; onSet(box.dataset.audio, url); toast('Đã lưu file nghe' + (note ? ` (${note})` : ''), 'ok'); }
     catch (err) { toast(err.message, 'err'); prog.textContent = '⚠️ ' + err.message; }
     finally { pending.delete(p); pick.disabled = false; }
   };

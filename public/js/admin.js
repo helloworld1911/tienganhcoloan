@@ -29,14 +29,17 @@ export async function dashboard() {
     ${!d.classes.length ? '<div class="hint mb">Bắt đầu: 1) tạo lớp & thêm học sinh → 2) tải đề + đáp án lên → 3) giao bài cho lớp.</div>' : ''}
     <div class="seg mb" id="gsel"><button class="on" data-g="all">Tất cả khối</button>${grades.map((g) => `<button data-g="${g ?? ''}">${gradeName(g)}</button>`).join('')}</div>
     <div id="body"></div>
+    ${state.user.role === 'admin' ? '<div class="card mt flat small" id="storage"><span class="muted">🎧 Đang kiểm tra kho file nghe…</span></div>' : ''}
     <div class="card mt flat small" id="health"><span class="muted">⚡ Đang đo tốc độ hệ thống…</span></div>`);
+  if (state.user.role === 'admin') drawStorage($('#storage', main));
   // đo tốc độ máy chủ ↔ CSDL (không chặn việc hiển thị trang)
   get('/health').then((h) => {
     const el = $('#health', main); if (!el) return;
     const slow = h.dbMs > 60;
+    const netlify = h.platform === 'netlify';
     el.innerHTML = `<b>⚡ Tốc độ hệ thống:</b> mỗi truy vấn tới CSDL mất <b class="${slow ? 'pct lo' : 'pct hi'}">${h.dbMs} ms</b>
-      · máy chủ Netlify ở vùng <b>${esc(h.region || '?')}</b> · kết nối ${h.driver === 'neon-http' ? 'HTTP (nhanh)' : esc(h.driver)}
-      ${slow ? `<div class="warnbox mt-s">CSDL đang đặt xa máy chủ Netlify nên mỗi trang chậm thêm khoảng ${Math.round(h.dbMs * 4 / 100) / 10}s.
+      · máy chủ ${netlify ? `Netlify ở vùng <b>${esc(h.region || '?')}</b>` : esc(h.platform === 'cloudflare' ? 'Cloudflare' : h.platform || '')} · kết nối ${h.driver === 'neon-http' ? 'HTTP (nhanh)' : esc(h.driver)}
+      ${slow && netlify ? `<div class="warnbox mt-s">CSDL đang đặt xa máy chủ Netlify nên mỗi trang chậm thêm khoảng ${Math.round(h.dbMs * 4 / 100) / 10}s.
         Nên tạo CSDL Neon mới ở vùng <b>AWS US East 2 (Ohio)</b> – cùng vùng với máy chủ Netlify gói miễn phí – rồi dùng nút
         <b>Sao lưu / Khôi phục</b> bên dưới để chuyển dữ liệu (xem README, mục “Tăng tốc”).</div>` : ''}
       ${state.user.role === 'admin' ? '<div class="row mt-s"><button class="btn ghost sm" id="bk">⬇️ Sao lưu dữ liệu</button><button class="btn ghost sm" id="rs">⬆️ Khôi phục từ file sao lưu</button><input type="file" id="rsf" accept=".json" hidden><button class="btn ghost sm" id="pm">🎧 Chép file nghe từ web cũ</button></div>' : ''}`;
@@ -78,6 +81,27 @@ export async function dashboard() {
     const b = e.target.closest('button'); if (!b) return;
     sel = b.dataset.g; $$('#gsel button', main).forEach((x) => x.classList.toggle('on', x === b)); draw();
   });
+}
+
+// ================================================================ KHO FILE NGHE
+async function drawStorage(el) {
+  if (!el) return;
+  let s;
+  try { s = await get('/admin/storage'); } catch { el.remove(); return; }
+  const MB = (b) => (b / 1024 / 1024 >= 1000 ? (b / 1024 ** 3).toFixed(2) + ' GB' : (b / 1024 / 1024).toFixed(1) + ' MB');
+  const p = s.limit ? Math.min(100, (s.used / s.limit) * 100) : null;
+  el.innerHTML = `<div class="row between"><b>🎧 Kho file nghe</b><span class="muted">${esc(s.backend)} · ${s.files} file</span></div>
+    ${p != null ? `<div class="mt-s bar ${p > 85 ? 'lo' : p > 60 ? 'mid' : 'hi'}"><i style="width:${Math.max(1, p)}%"></i></div>` : ''}
+    <div class="mt-s">Đã dùng <b>${MB(s.used)}</b>${s.limit ? ` / ${MB(s.limit)} miễn phí (<b class="pct ${p > 85 ? 'lo' : p > 60 ? 'mid' : 'hi'}">${p.toFixed(0)}%</b>)` : ''}.
+      File nghe tải lên được <b>tự nén</b> cho nhẹ; xoá đề hoặc đổi file nghe thì file cũ được <b>tự xoá</b>.</div>
+    ${p > 85 ? '<div class="warnbox mt-s">Kho sắp đầy – hãy xoá bớt đề cũ không dùng nữa.</div>' : ''}
+    ${s.orphans.n ? `<div class="row mt-s"><span>Có <b>${s.orphans.n}</b> file nghe không còn đề nào dùng (${MB(s.orphans.bytes)}).</span><button class="btn ghost sm" id="clean">🧹 Dọn ngay</button></div>` : ''}`;
+  const b = el.querySelector('#clean');
+  if (b) b.onclick = async () => {
+    b.disabled = true;
+    try { const r = await post('/admin/storage/cleanup'); toast(`Đã xoá ${r.deleted} file (${MB(r.bytes)})`, 'ok'); drawStorage(el); }
+    catch (e) { toast(e.message, 'err'); b.disabled = false; }
+  };
 }
 
 // ================================================================ SAO LƯU / KHÔI PHỤC

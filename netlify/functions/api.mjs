@@ -4,7 +4,7 @@
 import { q, one, batch, ensureSchema, pingDb, driverKind } from '../lib/db.mjs';
 import { hashPassword, verifyPassword, needsRehash, signToken, verifyToken, randomCode } from '../lib/auth.mjs';
 import { gradeAttempt, totals, stripAnswers } from '../lib/grade.mjs';
-import { putChunk, getChunk } from '../lib/storage.mjs';
+import { putChunk, getChunk, deletePrefix, storageInfo } from '../lib/storage.mjs';
 import { driveId, directUrl, fetchRange } from '../lib/remote-audio.mjs';
 import crypto from 'node:crypto';
 
@@ -165,6 +165,20 @@ route('DELETE', '/me/google', 'auth', async ({ user }) => {
 
 // ================================================================ FILE NGHE (tải lên theo mảnh)
 const CHUNK = 3 * 1024 * 1024; // 3MB / mảnh (giới hạn mỗi lần gửi của Netlify Functions là 6MB)
+
+// ---- dọn file nghe: file nào không còn đề nào dùng thì xoá khỏi kho
+const mediaIds = (content) => [...new Set([...JSON.stringify(content || {}).matchAll(/\/api\/media\/([\w-]{10,})/g)].map((m) => m[1]))];
+async function deleteMedia(rows) {
+  for (const m of rows) { await deletePrefix(m.id, m.chunks); await q('DELETE FROM media WHERE id=$1', [m.id]); }
+  return { deleted: rows.length, bytes: rows.reduce((a, m) => a + Number(m.size), 0) };
+}
+/** Xoá những file trong danh sách ids mà không còn đề nào nhắc tới */
+async function pruneMedia(ids) {
+  if (!ids.length) return { deleted: 0, bytes: 0 };
+  const rows = await q(`SELECT m.id, m.chunks, m.size FROM media m WHERE m.id = ANY($1::text[])
+    AND NOT EXISTS (SELECT 1 FROM exams e WHERE strpos(e.content::text, m.id) > 0)`, [ids]);
+  return deleteMedia(rows);
+}
 route('POST', '/media', 'staff', async ({ body, user }) => {
   const size = Number(body.size);
   if (!size || size > 80 * 1024 * 1024) fail(400, 'File phải nhỏ hơn 80MB');
@@ -267,6 +281,7 @@ route('GET', '/drive/:fid', null, async ({ params, req }) => {
 route('GET', '/health', 'staff', async () => ({
   dbMs: await pingDb(3),
   driver: driverKind(),
+  platform: globalThis.__CF_ENV ? 'cloudflare' : process.env.NETLIFY || process.env.AWS_REGION ? 'netlify' : 'local',
   region: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || null,
   dbHost: ((process.env.DATABASE_URL || '').match(/@([^/:?]+)/) || [])[1]?.replace(/^[^.]+\./, '…') || null,
 }));
@@ -308,6 +323,29 @@ route('POST', '/admin/restore/finish', 'admin', async () => {
   await Promise.all(SERIAL_TABLES.map((t) => q(`SELECT setval(pg_get_serial_sequence('${t}','id'), COALESCE((SELECT max(id) FROM ${t}), 1), (SELECT max(id) FROM ${t}) IS NOT NULL)`)));
   userCache.clear();
   return { ok: true };
+});
+
+// ---- dung lượng kho file nghe
+const ORPHAN_SQL = `SELECT m.id, m.chunks, m.size FROM media m WHERE m.created_at < now() - interval '1 day'
+  AND NOT EXISTS (SELECT 1 FROM exams e WHERE strpos(e.content::text, m.id) > 0)`;
+route('GET', '/admin/storage', 'admin', async () => {
+  const [tot, orph] = await Promise.all([one('SELECT count(*)::int AS n, COALESCE(sum(size),0)::float AS bytes FROM media'),
+    one(`SELECT count(*)::int AS n, COALESCE(sum(size),0)::float AS bytes FROM (${ORPHAN_SQL}) o`)]);
+  return { ...storageInfo(), files: tot.n, used: tot.bytes, orphans: orph };
+});
+/** Xoá file nghe không đề nào dùng (tải lên rồi bỏ, đã đổi file khác…) – chỉ file cũ hơn 1 ngày */
+route('POST', '/admin/storage/cleanup', 'admin', async () => deleteMedia(await q(ORPHAN_SQL + ' LIMIT 200')));
+
+// ---- tải file nghe từ link về trình duyệt (để nén trước khi lưu) – mỗi lần 1 đoạn ≤ 3MB
+route('GET', '/remote-audio', 'staff', async ({ req, query }) => {
+  const src = directUrl(clean(query.u, 2000));
+  const want = (req.headers.get('range') || '').match(/bytes=(\d*)-(\d*)/);
+  const start = want && want[1] !== '' ? +want[1] : 0;
+  let r;
+  try { r = await fetchRange(src, start, start + CHUNK - 1); } catch (e) { fail(400, e.message); }
+  if (!r.total || r.total > 80 * 1024 * 1024) fail(400, r.total ? 'File nghe phải nhỏ hơn 80MB' : 'Không xác định được dung lượng file nghe từ link này');
+  return new Response(r.buf, { status: 206, headers: { 'content-type': r.mime, 'content-range': `bytes ${start}-${start + r.buf.length - 1}/${r.total}`,
+    'x-file-name': encodeURIComponent(r.filename || ''), 'cache-control': 'no-store' } });
 });
 
 // ---- chép file nghe từ web cũ (sau khi chuyển web + khôi phục dữ liệu)
@@ -456,17 +494,24 @@ route('POST', '/exams', 'staff', async ({ body, user }) => {
 });
 route('PUT', '/exams/:id', 'staff', async ({ params, body }) => {
   const content = validateContent(body.content);
+  const old = await one('SELECT content FROM exams WHERE id=$1', [params.id]);
   const s = examStats(content);
   const e = await one(`UPDATE exams SET title=$1,grade=$2,time_limit=$3,content=$4,question_count=$5,total_points=$6,tags=$7,updated_at=now()
                        WHERE id=$8 RETURNING id,title`,
   [clean(body.title, 300) || 'Đề mới', int(body.grade), int(body.timeLimit), content, s.count, s.points, clean(body.tags, 200) || null, params.id]);
   if (!e) fail(404, 'Không tìm thấy đề');
+  // file nghe bị thay / bỏ khỏi đề → xoá nếu không đề nào khác dùng
+  const keep = new Set(mediaIds(content));
+  await pruneMedia(mediaIds(old?.content).filter((id) => !keep.has(id)));
   return e;
 });
 route('POST', '/exams/:id/duplicate', 'staff', async ({ params, user }) =>
   one(`INSERT INTO exams(title,grade,time_limit,source_name,content,question_count,total_points,tags,created_by)
        SELECT title||' (bản sao)',grade,time_limit,source_name,content,question_count,total_points,tags,$2 FROM exams WHERE id=$1 RETURNING id,title`, [params.id, user.id]));
-route('DELETE', '/exams/:id', 'staff', async ({ params }) => { await q('DELETE FROM exams WHERE id=$1', [params.id]); });
+route('DELETE', '/exams/:id', 'staff', async ({ params }) => {
+  const e = await one('DELETE FROM exams WHERE id=$1 RETURNING content', [params.id]);
+  return { ok: true, media: await pruneMedia(mediaIds(e?.content)) };
+});
 
 // ================================================================ GIAO BÀI (PUBLIC CHO LỚP)
 route('GET', '/assignments', 'staff', async ({ query }) => {

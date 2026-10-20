@@ -45,6 +45,15 @@ export async function getChunk(key) {
   return ab ? new Uint8Array(ab) : null;
 }
 
+/** Kho đang dùng + dung lượng miễn phí (byte) */
+export function storageInfo() {
+  const env = cf();
+  if (env?.MEDIA_R2) return { backend: 'Cloudflare R2', limit: 10 * 1024 ** 3 };
+  if (env?.MEDIA_KV) return { backend: 'Cloudflare KV', limit: 1024 ** 3 };
+  if (local()) return { backend: 'Thư mục máy', limit: null };
+  return { backend: 'Netlify Blobs', limit: null };
+}
+
 export async function deletePrefix(prefix, chunks) {
   const env = cf();
   for (let i = 0; i < chunks; i++) {

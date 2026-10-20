@@ -17,5 +17,7 @@
   "kv_namespaces": [
     { "binding": "MEDIA_KV", "id": "485d31b572f24831bb0188882d5c425b" }
   ],
+  // chạy API ở máy chủ Cloudflare gần CSDL Neon nhất (đỡ trễ mỗi truy vấn)
+  "placement": { "mode": "smart" },
   "observability": { "enabled": true }
 }

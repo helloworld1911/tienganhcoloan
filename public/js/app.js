@@ -113,6 +113,8 @@ async function route() {
     if (role === 'student' && isStaff()) { location.hash = '#/admin'; return; }
     const params = Object.fromEntries(keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
     window.scrollTo(0, 0);
+    // chuyển trang thì đóng hộp thoại còn mở của trang trước
+    document.querySelectorAll('.modal-bg').forEach((m) => { const c = m.querySelector('[data-close]'); if (c) c.click(); else m.remove(); });
     if (isStaff() && role) refreshPending();
     try { await view(params); } catch (e) { console.error(e); layout(`<div class="card empty"><div class="big">⚠️</div>${esc(e.message)}</div>`); }
     return;

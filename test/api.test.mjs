@@ -162,7 +162,36 @@ let privErr = null; try { await call('POST', '/media/import', { url: 'http://127
 ok(/chia sẻ công khai/.test(privErr || ''), 'link chưa chia sẻ: báo lỗi dễ hiểu');
 const head = await api(new Request('http://localhost' + media.url, { method: 'HEAD' }));
 ok(head.status === 200 || head.status === 206, 'hỗ trợ yêu cầu HEAD (Safari)');
+
+// tải file từ link về trình duyệt (để nén) – qua máy chủ web, từng đoạn
+const rp = await api(new Request('http://localhost/api/remote-audio?u=' + encodeURIComponent('http://127.0.0.1:5577/ranged'), { headers: { range: 'bytes=3145728-', authorization: 'Bearer ' + token } }));
+const rpb = new Uint8Array(await rp.arrayBuffer());
+ok(rp.status === 206 && rpb[0] === big[3145728] && rp.headers.get('content-range').endsWith('/' + big.length) && decodeURIComponent(rp.headers.get('x-file-name')) === 'Part 1.mp3', 'lấy file nghe từ link về trình duyệt theo từng đoạn');
 srv.close();
+
+// 6c3. Dọn file nghe: đổi file / xoá đề → file không còn dùng bị xoá khỏi kho
+const { q: dbq } = await import('../netlify/lib/db.mjs');
+const mkMedia = async () => {
+  const m = await call('POST', '/media', { name: 'x.mp3', size: 1000, mime: 'audio/mpeg' });
+  await api(new Request(`http://localhost/api/media/${m.id}/0`, { method: 'PUT', headers: { 'content-type': 'application/octet-stream', authorization: 'Bearer ' + token }, body: new Uint8Array(1000).fill(9) }));
+  return m;
+};
+const status = async (m) => (await api(new Request('http://localhost' + m.url, { headers: { range: 'bytes=0-9' } }))).status;
+const mA = await mkMedia(), mB = await mkMedia();
+const ex1 = await call('POST', '/exams', { title: 'Đề nghe 1', content: { ...exam, audioUrl: mA.url } });
+const ex2 = await call('POST', '/exams', { title: 'Đề nghe 2', content: { ...exam, audioUrl: mB.url } });
+await call('PUT', '/exams/' + ex1.id, { title: 'Đề nghe 1', content: { ...exam, audioUrl: mB.url } });
+ok(await status(mA) === 404 && await status(mB) === 206, 'đổi file nghe → file cũ tự xoá');
+await call('DELETE', '/exams/' + ex1.id);
+ok(await status(mB) === 206, 'xoá đề: file nghe đề khác còn dùng thì giữ lại');
+const delr = await call('DELETE', '/exams/' + ex2.id);
+ok(await status(mB) === 404 && delr.media.deleted === 1, 'xoá đề → file nghe tự xoá khỏi kho');
+const st1 = await call('GET', '/admin/storage');
+ok(st1.files >= 1 && st1.used > 0 && st1.orphans.n === 0, `xem dung lượng kho: ${st1.files} file, ${st1.used} byte`);
+await dbq(`UPDATE media SET created_at = now() - interval '2 days'`);
+const st2 = await call('GET', '/admin/storage');
+const cl = await call('POST', '/admin/storage/cleanup');
+ok(st2.orphans.n > 0 && cl.deleted === st2.orphans.n && (await call('GET', '/admin/storage')).orphans.n === 0 && await status(media) === 404, `dọn ${cl.deleted} file nghe không đề nào dùng`);
 
 // 6d. Gmail cho học sinh + cấu hình Google
 const cfg = await call('GET', '/config', null, null);
