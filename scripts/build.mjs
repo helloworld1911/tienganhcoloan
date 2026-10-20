@@ -1,4 +1,4 @@
-// Đóng gói giao diện cho Netlify: gộp + nén JS/CSS, tên file có mã băm để trình duyệt nhớ lâu.
+// Đóng gói giao diện (Cloudflare / Netlify): gộp + nén JS/CSS, tên file có mã băm để trình duyệt nhớ lâu.
 //   npm run build  →  thư mục dist/
 import { build } from 'esbuild';
 import fs from 'node:fs';
@@ -38,6 +38,20 @@ html = html.replace('/css/app.css', `/assets/${cssFile}`)
   .replace('<script type="module" src="/js/app.js"></script>', `<script type="module" src="/assets/${jsFile}"></script>`)
   .replace('</head>', [jsFile, ...staticImports].map((f) => `  <link rel="modulepreload" href="/assets/${f}">`).join('\n') + '\n</head>');
 fs.writeFileSync(path.join(out, 'index.html'), html);
+
+// 5. HTTP header cho file tĩnh (Cloudflare & Netlify đều đọc file _headers)
+fs.writeFileSync(path.join(out, '_headers'), `/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+/vendor/*
+  Cache-Control: public, max-age=31536000, immutable
+/
+  Cache-Control: public, max-age=0, must-revalidate
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+`);
 
 const size = (f) => (fs.statSync(path.join(out, 'assets', f)).size / 1024).toFixed(1) + 'KB';
 console.log('Đã đóng gói:');

@@ -1,0 +1,21 @@
+// Cấu hình Cloudflare Workers (gói miễn phí).
+// Cloudflare tự chạy:  npm run build  rồi  npx wrangler deploy  mỗi khi có code mới trên GitHub.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tienganhcoloan",
+  "main": "worker/index.mjs",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // giao diện (đã đóng gói vào dist/) – phục vụ miễn phí; chỉ /api/* mới chạy mã máy chủ
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"],
+    "not_found_handling": "single-page-application"
+  },
+  // kho chứa file nghe
+  "kv_namespaces": [
+    { "binding": "MEDIA_KV", "id": "485d31b572f24831bb0188882d5c425b" }
+  ],
+  "observability": { "enabled": true }
+}

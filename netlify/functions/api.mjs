@@ -2,7 +2,7 @@
 //  API duy nhất cho toàn bộ ứng dụng: /api/*
 // ============================================================================
 import { q, one, batch, ensureSchema, pingDb, driverKind } from '../lib/db.mjs';
-import { hashPassword, verifyPassword, signToken, verifyToken, randomCode } from '../lib/auth.mjs';
+import { hashPassword, verifyPassword, needsRehash, signToken, verifyToken, randomCode } from '../lib/auth.mjs';
 import { gradeAttempt, totals, stripAnswers } from '../lib/grade.mjs';
 import { putChunk, getChunk } from '../lib/storage.mjs';
 import { driveId, directUrl, fetchRange } from '../lib/remote-audio.mjs';
@@ -103,7 +103,8 @@ route('POST', '/auth/login', null, async ({ body }) => {
   const u = await one('SELECT * FROM users WHERE username=$1', [String(body.username || '').toLowerCase().trim()]);
   if (!u || !verifyPassword(body.password, u.password_hash)) fail(401, 'Sai tên đăng nhập hoặc mật khẩu');
   if (!u.active) fail(403, 'Tài khoản đã bị khoá');
-  await q('UPDATE users SET last_login=now() WHERE id=$1', [u.id]);
+  if (needsRehash(u.password_hash)) await q('UPDATE users SET last_login=now(), password_hash=$2 WHERE id=$1', [u.id, hashPassword(body.password)]);
+  else await q('UPDATE users SET last_login=now() WHERE id=$1', [u.id]);
   return login(u);
 });
 // Học sinh không tự đăng ký được nữa: chỉ quản trị viên tạo tài khoản (xem POST /users và /users/register).
@@ -306,6 +307,24 @@ route('POST', '/admin/restore/rows/:table', 'admin', async ({ params, body }) =>
 route('POST', '/admin/restore/finish', 'admin', async () => {
   await Promise.all(SERIAL_TABLES.map((t) => q(`SELECT setval(pg_get_serial_sequence('${t}','id'), COALESCE((SELECT max(id) FROM ${t}), 1), (SELECT max(id) FROM ${t}) IS NOT NULL)`)));
   userCache.clear();
+  return { ok: true };
+});
+
+// ---- chép file nghe từ web cũ (sau khi chuyển web + khôi phục dữ liệu)
+route('GET', '/admin/media', 'admin', async () => q('SELECT id, name, size, chunk_size, chunks FROM media ORDER BY created_at'));
+route('POST', '/admin/media/:id/pull/:n', 'admin', async ({ params, body }) => {
+  const m = await one('SELECT * FROM media WHERE id=$1', [params.id]);
+  if (!m) fail(404, 'Không tìm thấy file nghe');
+  const n = int(params.n);
+  if (n == null || n < 0 || n >= m.chunks) fail(400, 'Số thứ tự không hợp lệ');
+  if (await getChunk(`${m.id}/${n}`)) return { skipped: true };
+  let from;
+  try { from = new URL(String(body.from || '')); } catch { fail(400, 'Địa chỉ web cũ không hợp lệ'); }
+  const start = n * m.chunk_size, end = Math.min(Number(m.size), start + m.chunk_size) - 1;
+  let r;
+  try { r = await fetchRange(`${from.origin}/api/media/${m.id}`, start, end); } catch (e) { fail(400, e.message); }
+  if (r.buf.length !== end - start + 1) fail(400, `Web cũ trả về thiếu dữ liệu (${r.buf.length}/${end - start + 1} byte)`);
+  await putChunk(`${m.id}/${n}`, r.buf);
   return { ok: true };
 });
 

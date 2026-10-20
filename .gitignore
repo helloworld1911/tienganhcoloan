@@ -4,3 +4,5 @@ node_modules/
 .env
 test/real/
 dist/
+.wrangler/
+.dev.vars

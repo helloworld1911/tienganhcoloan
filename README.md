@@ -66,7 +66,23 @@ Chạy kiểm thử: `npm test`. Thử với đề thật của bạn: `npm run 
 
 ---
 
-## Deploy lên Netlify (khuyên dùng: Neon làm database)
+## Deploy lên Cloudflare Workers (miễn phí – khuyên dùng)
+
+Gói miễn phí: 100.000 lượt gọi API/ngày, giao diện + băng thông không tính phí, deploy không giới hạn. File nghe lưu ở **Workers KV** (1 GB miễn phí). Cấu hình nằm trong `wrangler.jsonc`, điểm vào là `worker/index.mjs` (dùng chung mã API với Netlify).
+
+1. **Tạo KV**: Cloudflare → *Storage & databases → Workers KV → Create* tên `media` → chép **ID** vào `wrangler.jsonc` (`kv_namespaces[0].id`).
+2. **Tạo Worker từ GitHub**: *Compute → Workers & Pages → Create → Import a repository* → chọn repo.
+   - Project name: `tienganhcoloan` (phải trùng `name` trong `wrangler.jsonc`)
+   - Build command: `npm run build` · Deploy command: `npx wrangler deploy`
+3. **Biến môi trường** (Worker → *Settings → Variables and Secrets*, chọn kiểu **Secret**):
+   `DATABASE_URL` (chuỗi kết nối Neon – giữ nguyên chuỗi đang dùng thì không phải chuyển dữ liệu), `JWT_SECRET` (nếu đã đặt bên Netlify thì dùng đúng giá trị đó), `GOOGLE_CLIENT_ID` (nếu dùng đăng nhập Google – nhớ thêm địa chỉ `…workers.dev` mới vào *Authorized JavaScript origins* trong Google Cloud).
+4. **Chuyển file nghe** từ web cũ: đăng nhập admin ở web mới → *Tổng quan* → **🎧 Chép file nghe từ web cũ** → nhập địa chỉ web cũ.
+   (Nếu dùng database Neon mới thì trước đó *Sao lưu* ở web cũ → *Khôi phục* ở web mới.)
+
+Ghi chú kỹ thuật: gói miễn phí giới hạn ~10 ms CPU mỗi lượt gọi → mật khẩu lưu bằng PBKDF2 (mật khẩu cũ dạng scrypt vẫn đăng nhập được và tự chuyển sang kiểu mới); thêm nhiều học sinh một lúc được gửi lên từng em một.
+Chạy thử bản Cloudflare trên máy: `node test/neon-mock.mjs` rồi `npx wrangler dev --var DATABASE_URL:postgres://u:p@x.neon.tech/db --var NEON_FETCH_ENDPOINT:http://127.0.0.1:4444/sql --var JWT_SECRET:dev`.
+
+## Deploy lên Netlify (Neon làm database)
 
 ### Bước 1 – Tạo database Postgres miễn phí trên Neon
 1. Vào https://neon.tech → **Sign up** (đăng nhập bằng Google/GitHub).

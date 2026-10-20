@@ -1,19 +1,28 @@
-// Mật khẩu (scrypt) + token đăng nhập (JWT HS256) – không cần thư viện ngoài
+// Mật khẩu (PBKDF2-SHA256; vẫn đọc được mật khẩu cũ dạng scrypt) + token đăng nhập (JWT HS256)
+// PBKDF2 với số vòng vừa phải để mỗi lần đăng nhập chỉ tốn vài ms CPU (giới hạn gói miễn phí Cloudflare: 10 ms).
 import crypto from 'node:crypto';
 import { connectionFingerprint } from './db.mjs';
 
+const ITER = 10000;
 export function hashPassword(pw) {
   const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(String(pw), salt, 32).toString('hex');
-  return `scrypt$${salt}$${hash}`;
+  const hash = crypto.pbkdf2Sync(String(pw), salt, ITER, 32, 'sha256').toString('hex');
+  return `pbkdf2$${ITER}$${salt}$${hash}`;
 }
 export function verifyPassword(pw, stored) {
-  const [alg, salt, hash] = String(stored || '').split('$');
-  if (alg !== 'scrypt' || !salt || !hash) return false;
-  const h = crypto.scryptSync(String(pw), salt, 32);
-  const expected = Buffer.from(hash, 'hex');
+  const parts = String(stored || '').split('$');
+  let h, expected;
+  if (parts[0] === 'pbkdf2' && parts.length === 4) {
+    expected = Buffer.from(parts[3], 'hex');
+    h = crypto.pbkdf2Sync(String(pw), parts[2], +parts[1] || ITER, expected.length, 'sha256');
+  } else if (parts[0] === 'scrypt' && parts.length === 3) {
+    expected = Buffer.from(parts[2], 'hex');
+    h = crypto.scryptSync(String(pw), parts[1], 32);
+  } else return false;
   return expected.length === h.length && crypto.timingSafeEqual(h, expected);
 }
+/** Mật khẩu lưu theo kiểu cũ (scrypt – tốn CPU) → nên lưu lại theo kiểu mới sau khi đăng nhập đúng */
+export const needsRehash = (stored) => !String(stored || '').startsWith(`pbkdf2$${ITER}$`);
 
 function secret() {
   // Nên đặt JWT_SECRET trong Netlify. Nếu chưa đặt, sinh khoá từ chuỗi kết nối CSDL (vốn là bí mật).

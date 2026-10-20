@@ -3,13 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Web luyện bài tập tiếng Anh cho học sinh – Netlify + Netlify Database (Postgres)",
+  "description": "Tiếng Anh cô Loan – web luyện bài tập tiếng Anh theo lớp (Cloudflare Workers / Netlify + Postgres Neon)",
   "scripts": {
     "local": "node scripts/local-server.mjs",
     "dev": "netlify dev",
     "test": "node test/parser.test.mjs && node test/api.test.mjs",
     "test:real": "node test/real.test.mjs",
-    "build": "node scripts/build.mjs"
+    "build": "node scripts/build.mjs",
+    "deploy:cf": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.2.0",
@@ -20,7 +21,8 @@
     "@electric-sql/pglite": "^0.3.0",
     "esbuild": "^0.24.2",
     "mammoth": "^1.8.0",
-    "pdfjs-dist": "^4.10.38"
+    "pdfjs-dist": "^4.10.38",
+    "wrangler": "^4.151.3"
   },
   "engines": {
     "node": ">=20"

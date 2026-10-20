@@ -1,10 +1,11 @@
-// Kết nối Postgres – tối ưu cho Netlify Functions:
+// Kết nối Postgres – chạy được trên Cloudflare Workers và Netlify Functions:
 // - Neon (DATABASE_URL chứa neon.tech, hoặc Netlify Database): dùng driver HTTP của Neon →
 //   không phải mở kết nối TCP/TLS mỗi lần hàm khởi động, mỗi truy vấn = 1 lượt HTTP.
 // - Postgres khác: dùng pool kết nối thường (pg).
 // - Chạy thử trên máy / kiểm thử: PGlite trong tiến trình (useLocalDb).
-import { getDatabase } from '@netlify/database';
-import { neon } from '@neondatabase/serverless';
+import { neon, neonConfig } from '@neondatabase/serverless';
+// @netlify/database chỉ nạp khi thật sự cần (không dùng trên Cloudflare)
+const netlifyDb = () => import('@netlify/database').then((m) => m.getDatabase);
 import { SCHEMA_SQL, SCHEMA_VERSION } from './schema.mjs';
 
 let driver = null;     // { kind, query(text, params) -> rows, batch([[text, params]]) -> rows[][] }
@@ -31,27 +32,32 @@ function getDriver() {
   if (driver) return driver;
   const url = connectionString();
   if (!url) {
-    throw new Error('Chưa kết nối cơ sở dữ liệu. Vào Netlify → Project configuration → Environment variables, thêm biến DATABASE_URL (chuỗi kết nối Neon) rồi deploy lại.');
+    throw new Error('Chưa kết nối cơ sở dữ liệu. Thêm biến DATABASE_URL (chuỗi kết nối Neon) trong phần cài đặt biến môi trường (Cloudflare: Settings → Variables and Secrets; Netlify: Environment variables) rồi deploy lại.');
   }
   const custom = process.env.DATABASE_URL || process.env.NETLIFY_DATABASE_URL;
   const isNeon = custom ? /\.neon\.tech|neon\.build/i.test(custom) : process.env.NETLIFY_DB_DRIVER === 'serverless';
+  if (process.env.NEON_FETCH_ENDPOINT) neonConfig.fetchEndpoint = process.env.NEON_FETCH_ENDPOINT; // chỉ dùng khi kiểm thử
   if (isNeon) {
-    const sql = custom ? neon(custom) : getDatabase().httpClient;
+    let sqlP = null;
+    const getSql = () => (sqlP ||= custom ? Promise.resolve(neon(custom)) : netlifyDb().then((g) => g().httpClient));
     driver = {
       kind: 'neon-http',
-      query: (t, p = []) => sql.query(t, p),
+      query: async (t, p = []) => (await getSql()).query(t, p),
       // nhiều câu lệnh trong 1 transaction, gửi trong 1 lượt HTTP
-      batch: (list) => sql.transaction(list.map(([t, p = []]) => sql.query(t, p))),
+      batch: async (list) => { const sql = await getSql(); return sql.transaction(list.map(([t, p = []]) => sql.query(t, p))); },
     };
   } else {
-    const conn = custom ? getDatabase({ connectionString: custom }) : getDatabase();
-    const pool = conn.pool;
-    if (process.env.DB_POOL_MAX && pool.options) pool.options.max = +process.env.DB_POOL_MAX;
+    let poolP = null;
+    const getPool = () => (poolP ||= netlifyDb().then((g) => {
+      const pool = (custom ? g({ connectionString: custom }) : g()).pool;
+      if (process.env.DB_POOL_MAX && pool.options) pool.options.max = +process.env.DB_POOL_MAX;
+      return pool;
+    }));
     driver = {
       kind: 'pg',
-      query: async (t, p = []) => (await pool.query(t, p)).rows,
+      query: async (t, p = []) => (await (await getPool()).query(t, p)).rows,
       batch: async (list) => {
-        const c = await pool.connect();
+        const c = await (await getPool()).connect();
         try {
           await c.query('BEGIN');
           const out = [];

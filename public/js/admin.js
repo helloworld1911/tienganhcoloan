@@ -39,7 +39,7 @@ export async function dashboard() {
       ${slow ? `<div class="warnbox mt-s">CSDL đang đặt xa máy chủ Netlify nên mỗi trang chậm thêm khoảng ${Math.round(h.dbMs * 4 / 100) / 10}s.
         Nên tạo CSDL Neon mới ở vùng <b>AWS US East 2 (Ohio)</b> – cùng vùng với máy chủ Netlify gói miễn phí – rồi dùng nút
         <b>Sao lưu / Khôi phục</b> bên dưới để chuyển dữ liệu (xem README, mục “Tăng tốc”).</div>` : ''}
-      ${state.user.role === 'admin' ? '<div class="row mt-s"><button class="btn ghost sm" id="bk">⬇️ Sao lưu dữ liệu</button><button class="btn ghost sm" id="rs">⬆️ Khôi phục từ file sao lưu</button><input type="file" id="rsf" accept=".json" hidden></div>' : ''}`;
+      ${state.user.role === 'admin' ? '<div class="row mt-s"><button class="btn ghost sm" id="bk">⬇️ Sao lưu dữ liệu</button><button class="btn ghost sm" id="rs">⬆️ Khôi phục từ file sao lưu</button><input type="file" id="rsf" accept=".json" hidden><button class="btn ghost sm" id="pm">🎧 Chép file nghe từ web cũ</button></div>' : ''}`;
     if (state.user.role === 'admin') bindBackup(el);
   }).catch(() => { const el = $('#health', main); if (el) el.remove(); });
   const draw = () => {
@@ -103,6 +103,31 @@ function bindBackup(el) {
     } catch (e) { toast(e.message, 'err'); } finally { btn.disabled = false; btn.textContent = '⬇️ Sao lưu dữ liệu'; }
   };
   el.querySelector('#rs').onclick = () => el.querySelector('#rsf').click();
+  // Sau khi chuyển web (VD từ Netlify sang Cloudflare) + khôi phục dữ liệu: file nghe vẫn nằm ở web cũ → chép sang
+  el.querySelector('#pm').onclick = () => modal(`<h2>Chép file nghe từ web cũ</h2>
+    <p>Dùng sau khi chuyển web sang địa chỉ mới và đã <b>khôi phục dữ liệu</b>. File nghe đã tải lên ở web cũ sẽ được chép sang đây (web cũ vẫn phải đang chạy).</p>
+    <form id="pf" class="form-grid"><label class="f">Địa chỉ web cũ<input name="from" required placeholder="https://ten-web.netlify.app"></label></form>
+    <div id="pr" class="small muted"></div>
+    <div class="actions"><button class="btn ghost" data-close>Đóng</button><button class="btn" id="ok">Bắt đầu chép</button></div>`, {
+    onMount: (m) => m.querySelector('#ok').onclick = async () => {
+      const f = m.querySelector('#pf'); if (!f.reportValidity()) return;
+      const from = f.from.value.trim().replace(/\/+$/, '');
+      const okb = m.querySelector('#ok'); const pr = m.querySelector('#pr'); okb.disabled = true;
+      try {
+        const list = await get('/admin/media');
+        let copied = 0, skipped = 0, failed = [];
+        for (const [i, md] of list.entries()) {
+          for (let n = 0; n < md.chunks; n++) {
+            pr.textContent = `File ${i + 1}/${list.length} (${md.name || md.id}) – phần ${n + 1}/${md.chunks}…`;
+            try { const r = await post(`/admin/media/${md.id}/pull/${n}`, { from }); r.skipped ? skipped++ : copied++; }
+            catch (e) { failed.push(`${md.name || md.id}: ${e.message}`); break; }
+          }
+        }
+        pr.innerHTML = `Xong: chép ${copied} phần, ${skipped} phần đã có sẵn.${failed.length ? '<br><b>Lỗi:</b><br>' + failed.map(esc).join('<br>') : ''}`;
+        toast(failed.length ? 'Có file chưa chép được' : 'Đã chép xong file nghe', failed.length ? 'err' : 'ok');
+      } catch (e) { toast(e.message, 'err'); } finally { okb.disabled = false; }
+    },
+  });
   el.querySelector('#rsf').onchange = async (e) => {
     const f = e.target.files[0]; e.target.value = ''; if (!f) return;
     let data;
@@ -243,6 +268,27 @@ function slug(name) {
   const last = base.pop();
   return last + base.map((w) => w[0]).join('');
 }
+/** Tạo nhiều tài khoản: gửi từng em một (4 em cùng lúc) để mỗi lượt gọi máy chủ luôn nhẹ, gộp kết quả lại. */
+async function createUsers(users, btn) {
+  const out = { created: [], errors: [] };
+  let next = 0, done = 0;
+  const label = btn?.textContent;
+  const worker = async () => {
+    while (next < users.length) {
+      const i = next++;
+      try {
+        const r = await post('/users', { users: [users[i]] });
+        out.created.push(...r.created);
+        out.errors.push(...r.errors.map((e) => ({ ...e, row: i + 1 })));
+      } catch (e) { out.errors.push({ row: i + 1, username: users[i].username, error: e.message }); }
+      done++; if (btn && users.length > 1) btn.textContent = `Đang tạo ${done}/${users.length}…`;
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, users.length) }, worker));
+  if (btn) btn.textContent = label;
+  out.errors.sort((a, b) => a.row - b.row);
+  return out;
+}
 function addStudents(c, done) {
   modal(`<h2>Thêm học sinh vào lớp ${esc(c.name)}</h2>
     <div class="tabs" id="mt"><button class="on" data-t="one">Từng em</button><button data-t="bulk">Nhập danh sách</button></div>
@@ -266,7 +312,7 @@ function addStudents(c, done) {
           .map(([fullName, username, password, email]) => ({ fullName, username: username || slug(fullName) + suffix, password: password || '123456', email: email || '', classId: c.id }));
         if (!users.length) return;
         try {
-          const r = await post('/users', { users });
+          const r = await createUsers(users, m.querySelector('#ok'));
           m.querySelector('#res').innerHTML = `<div class="${r.errors.length ? 'warnbox' : 'hint'} mt">Đã tạo ${r.created.length} tài khoản.${r.errors.length ? '<br>Lỗi: ' + r.errors.map((x) => `dòng ${x.row} (${esc(x.username || '')}): ${esc(x.error)}`).join('<br>') : ''}</div>`;
           if (r.created.length) done && setTimeout(() => { if (!r.errors.length) { close(); done(); } }, r.errors.length ? 0 : 600);
           if (r.errors.length && r.created.length) m.querySelector('[data-close]').onclick = () => { close(); done(); };
