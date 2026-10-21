@@ -7,7 +7,7 @@
   "scripts": {
     "local": "node scripts/local-server.mjs",
     "dev": "netlify dev",
-    "test": "node test/parser.test.mjs && node test/api.test.mjs",
+    "test": "node test/parser.test.mjs && node test/sections.test.mjs && node test/api.test.mjs",
     "test:real": "node test/real.test.mjs",
     "build": "node scripts/build.mjs",
     "deploy:cf": "npm run build && wrangler deploy"
