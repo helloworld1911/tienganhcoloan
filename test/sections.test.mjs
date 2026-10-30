@@ -1,7 +1,7 @@
 // Kiểm thử: đề & đáp án đánh số lại từ 1 ở mỗi phần, phiếu "Your answers", ngân hàng phương án A–G,
 // ghép tiêu đề, bài tìm & sửa lỗi trong đoạn văn (bảng Line/Error/Correction), phương án gõ thiếu dấu.
 //   node test/sections.test.mjs
-import { htmlToBlocks, parseExam, attachAnswerKey, finalizeExam } from '../public/js/parser.js';
+import { htmlToBlocks, parseExam, attachAnswerKey, finalizeExam, splitEmbeddedKey } from '../public/js/parser.js';
 import { isTextCorrect } from '../netlify/lib/grade.mjs';
 
 const ok = (cond, msg) => { if (!cond) throw new Error('FAIL: ' + msg); console.log('  ✓', msg); };
@@ -137,4 +137,46 @@ ok(vi2.questions.length === 2 && vi2.questions[0].stemHtml.startsWith('Tuan') &&
   && /Mystery Park/.test(vi2.passageHtml) && vi2.topic === 'reading_comprehension' && ans(vi2) === 'A,D', 'đoạn mô tả A–E dài ở bài đọc, câu "______ 1." chọn chữ cái, đáp án A,D');
 const v8 = p2('VIII');
 ok(v8.questions[0].lead === 'My friend ___' && v8.questions[1].answer.startsWith('She has made fewer'), 'mũi tên ⇨ và đáp án "VIII:" (dấu hai chấm)');
+
+// ---- Đề 3: đề + đáp án chung 1 file, tiêu đề "DA …"; dòng đầu gồm tên đề + "I. Listen…"; phương án trong bảng / dính cuối câu;
+//      bản sao đề in đậm cả chữ A B C D; đáp án tự luận chỉ có ở danh sách cuối file; "form of the word given"
+const ex3Html = `
+<p><b>LUONG TAI GK1 ANH 8</b> . I. Listen to the conversation about living in the countryside. Circle A, B ,C or D to answer each question.</p>
+<p>1. What does he like about the village?</p><p>A. the mountains B. the ocean C. the pollution D. the noise</p>
+<p>Choose the best answer A, B, C, or D to complete the sentences. (1.5 pt)</p>
+<p>2. Children in the countryside enjoy ……….cattle in the field.</p><table>${row('A. walking', 'B. herding', 'C. following', 'D. raising')}</table>
+<p>3.We don't cheat on exams , … it is a wrong thing to doA. for B. but C.so D. and</p>
+<p>4. Harvest time is the busiest period when farmers _________ crops.</p><p>A. cultivate B. grow C. herd D. harvest</p>
+<p>IV. Fill in each blank with the suitable form of the word given. (0,5 pt)</p>
+<p>1.The farmers are … the rice from the back of the truck. (LOAD)</p>
+<p>II. Combine the two sentences to make compound sentences, using the words from the box.(1pt)</p>
+<p>1.She is very sensitive . Don't comment on her new hairstyle.(<b>so</b>)</p>
+<p><b>DA GK1 ANH 8 LUONG TAI .</b></p>
+<p><b>LUONG TAI GK1 ANH 8 . I. Listen to the conversation about living in the countryside. Circle A, B ,C or D to answer each question.</b></p>
+<p>1. <b>What does he like about the village</b>?</p><p><b>A. the mountains</b> B. the ocean C. the pollution D. the noise</p>
+<p><b>Choose the best answer A, B, C, or D to complete the sentences. (1.5 pt) </b></p>
+<p><b>2</b>. Children in the countryside enjoy ……….cattle in the field.</p><table>${row('A. walking', '<b>B. herding</b>', 'C. following', 'D. raising')}</table>
+<p>3.We don't cheat on exams , … it is a wrong thing to do<b>A. for</b> B. but C.so D. and</p>
+<p><b>4.</b> Harvest time is the busiest period when farmers _________ crops.</p><p><b>A.</b> cultivate <b>B.</b> grow <b>C.</b> herd <b>D. harvest</b></p>
+<p><b>IV. Fill in each blank with the suitable form of the word given. (0,5 pt)</b></p>
+<p>1.The farmers are … the rice from the back of the truck. <b>(LOAD)</b></p>
+<p><b>II. Combine the two sentences to make compound sentences, using the words from the box.(1pt)</b></p>
+<p>1.She is very sensitive . Don't comment on her new hairstyle.(<b>so</b>)</p>
+<p><b>IV. Fill in each blank with the suitable form of the word given. (0,5 pt)</b><i> Mỗi câu đúng cho 0,25đ)</i></p>
+<p>1.unloading</p>
+<p><b>II. Combine the two sentences to make compound sentences, using the words from the box.(1.0pt)</b></p>
+<p>1.She is very sensitive, so don't comment on her new hairstyle.</p>
+`;
+const b3 = htmlToBlocks(ex3Html);
+const sp3 = splitEmbeddedKey(b3);
+ok(sp3.key && sp3.key[0].text.startsWith('DA GK1'), 'nhận ra phần đáp án bắt đầu bằng "DA …" trong cùng file đề');
+const ex3 = parseExam(sp3.exam, { fileName: 'de3.docx' });
+attachAnswerKey(ex3, sp3.key); finalizeExam(ex3);
+const q3 = ex3.parts.flatMap((p) => p.questions);
+ok(ex3.parts[0].topic === 'listening' && q3[0].answer === 'A', 'dòng đầu "Tên đề . I. Listen…" → phần Nghe, đáp án in đậm');
+ok(q3[1].options.length === 4 && q3[1].answer === 'B', 'phương án nằm trong bảng (A. walking ‖ B. herding …)');
+ok(q3[2].options.length === 4 && q3[2].answer === 'A', 'phương án dính cuối câu ("…to doA. for B. but")');
+ok(q3[3].answer === 'D', 'bản sao đề in đậm cả chữ A B C D: chỉ nhận phương án in đậm cả nội dung');
+ok(ex3.parts.find((p) => p.topic === 'word_form')?.questions[0].answer === 'unloading', '"form of the word given" là từ loại; từ gốc in đậm không phải đáp án; lấy đáp án ở danh sách cuối file');
+ok(/so don't comment/.test(q3[5].answer), 'đáp án ghép câu chỉ có ở danh sách cuối file');
 console.log('\nTất cả kiểm thử đề chia phần đều đạt ✔');

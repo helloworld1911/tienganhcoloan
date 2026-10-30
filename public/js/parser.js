@@ -175,7 +175,7 @@ const ARROW_RE = /^(?:→|->|=>|⇒|⇨|➔|➜|➡|⟹|➝|➞|►)\s*(.*)$/;
 const LETTERS_ONLY_RE = /^\(?A\)?[\s.]+\(?B\)?[\s.]+\(?C\)?[\s.]+\(?D\)?\.?$/;
 const POINTS_RE = /\((\d+(?:[.,]\d+)?)\s*(?:pts?|points?|điểm|marks?)\)/i;
 const INSTRUCTION_RE = /^(?:Choose|Mark|Read|Complete|Fill|Give|Put|Rewrite|Re-write|Finish|Write|Find|Identify|Listen|Use|Supply|Rearrange|Reorder|Circle|Match|Decide|Underline|Combine|Select|Pick|Answer|Make|Change|Correct|Look|There\s+(?:are|is)|Each|Every|In each|Chọn|Đọc|Viết|Điền|Hoàn thành|Sắp xếp|Nghe|Tìm|Khoanh)\b/i;
-const KEY_HEAD_RE = /^(?:ĐÁP ÁN|DAP AN|ANSWER KEYS?|KEYS?|HƯỚNG DẪN CHẤM|HUONG DAN CHAM)\b/i;
+const KEY_HEAD_RE = /^(?:ĐÁP ÁN|DAP AN|ANSWER KEYS?|KEYS?|HƯỚNG DẪN CHẤM|HUONG DAN CHAM)\b|^(?:DA|ĐA|Đ\/A)\s+(?=[A-Z0-9])[^.!?]{0,50}\.?\s*$/i;
 const END_RE = /^[-–—_*\s]*(?:THE END|HẾT|-?\s*HẾT\s*-?)[-–—_*\s]*$/i;
 // Phiếu trả lời in sẵn trong đề ("Your answers: 1. ____ 2. ____", bảng Line/Error/Correction) – không phải câu hỏi
 const ANSWER_SHEET_RE = /^(?:Your answers?|Answers?|Answer sheet|Đáp án của em|Phần trả lời|Trả lời|Bài làm)\s*:/i;
@@ -196,6 +196,7 @@ export function detectTopic(text, info = {}) {
   if (/closest in meaning|opposite in meaning|synonym|antonym|đồng nghĩa|trái nghĩa/.test(s)) return 'synonym_antonym';
   if (/pronounc|underlined part|phát âm|sound/.test(s) && !/mistake|error/.test(s)) return 'pronunciation';
   if (/mistake|error|lỗi sai|incorrect|needs? correct|extra word|từ thừa/.test(s)) return 'error_identification';
+  if (/(?:correct|suitable|right|appropriate) forms? of the words?|forms? of the words? (?:given|in (?:brackets|capitals|parentheses))/.test(s)) return 'word_form';
   if (/using the (?:given )?words|words? given to (?:make|complete|write)|sentence building|cues|sắp xếp|rearrange|reorder|in (?:the )?correct order|meaningful sentence|make (?:complete )?sentences/.test(s)) return 'sentence_building';
   if (/same meaning|means? the same|second sentence|similar|rewrite|re-write|finish (?:each|the)|means? exactly|viết lại|beginning with|given word|word given|keyword|combine|join each pair/.test(s)) return 'sentence_transformation';
   if (/write (?:an?|a short|your)?\s*(?:email|e-mail|letter|paragraph|essay|passage|reply|story|note)|about \d+\s*words|viết (?:đoạn|thư|bài)/.test(s)) return 'writing';
@@ -239,7 +240,8 @@ export function splitOptions(html, firstLetter = 'A') {
     const raw = html.slice(sq.end, k + 1 < seq.length ? seq[k + 1].start : undefined);
     const prefix = html.slice(Math.max(0, sq.start - 12), sq.start);
     // đáp án được in đậm / gạch chân cả phương án (dùng khi đọc file đáp án)
-    const marked = /<(b|u)>\s*(<(b|u)>\s*)?$/.test(prefix) || /^\s*<(b|u)>[^<]{1,80}<\/(b|u)>\s*$/.test(raw.replace(/<\/(b|u)>\s*<(b|u)>/g, ''));
+    const letterOnly = /^\s*<\/(b|u)>/.test(raw);
+    const marked = (!letterOnly && /<(b|u)>[\s.]*(<(b|u)>\s*)?$/.test(prefix)) || /^\s*<(b|u)>[^<]{1,80}<\/(b|u)>\s*$/.test(raw.replace(/<\/(b|u)>\s*<(b|u)>/g, ''));
     return { key: sq.letter, html: trimHtml(balanceTags(cleanHtml(raw))), ...(marked ? { marked: true } : {}) };
   });
   return { before: trimHtml(balanceTags(html.slice(0, seq[0].start))), options };
@@ -274,6 +276,7 @@ export function parseExam(blocks, opts = {}) {
   const startQ = (num, html) => {
     ensurePart();
     finishQ();
+    html = html.replace(/([a-z?!.”"'])((?:<[^>]+>)*)A\s*\.(?=[^]*\bB\s*\.[^]*\bC\s*\.[^]*\bD\s*\.)/, '$1 $2A.');
     q = { num, stemHtml: '', lead: '', options: [], answer: '', accepted: [], explanation: '', notes: [] };
     part.questions.push(q);
     lastNum = num;
@@ -345,6 +348,11 @@ export function parseExam(blocks, opts = {}) {
       part._partNo = labelNum(m[1]); part._roman = romanCtx;
       continue;
     }
+    {
+      const tm = !part && text.match(/^(.{3,60}?)\s*[.:\-–]\s+([IVX]{1,4}\s*[.)]\s+.{8,})$/);
+      const tr = tm && tm[2].match(ROMAN_RE);
+      if (tr && INSTRUCTION_RE.test(tr[2])) { text = tm[2]; html = html.replace(/^[\s\S]*?(?=[IVX]{1,4}\s*[.)]\s+(?:<[^>]+>\s*)*[A-Z])/, (pre) => (/<b>/.test(pre) && !/<\/b>/.test(pre) ? '<b>' : '')); }
+    }
     if ((m = text.match(ROMAN_RE)) && INSTRUCTION_RE.test(m[2])) {
       headerDone = true;
       // "II. …" sau nhóm "I. LISTENING": hết nhóm → quay về tiêu đề Phần lớn
@@ -373,6 +381,16 @@ export function parseExam(blocks, opts = {}) {
       const cells = b.cells.filter((c) => c.text || /<img /.test(c.html));
       if (cells.length >= 2 && cells.every((c) => /<img /.test(c.html) && !c.text.replace(/^[A-H][.)]?$/, ''))) {
         q._imgs = cells.map((c) => c.html.replace(/<br>/g, '')); continue;
+      }
+      const lettered = cells.map((c) => c.text.match(/^\(?([A-H])\)?\s*[.)]\s*(\S[\s\S]*)$/));
+      if (cells.length >= 2 && lettered.every((m, k) => m && m[1] === String.fromCharCode(65 + k))) {
+        q.options = cells.map((c, k) => {
+          const h = c.html.replace(/<br>/g, ' ');
+          const body = h.replace(/^((?:\s*<[^>]+>)*)\s*\(?[A-H]\)?\s*[.)]\s*/, '$1');
+          const marked = opts.keyMode && /^\s*<(b|u)>[\s\S]*<\/(b|u)>\s*$/.test(body.replace(/^\s*<\/(b|u)>/, '')) && !/^\s*<\/(b|u)>/.test(body);
+          return { key: lettered[k][1], html: trimHtml(balanceTags(cleanHtml(body))), ...(marked ? { marked: true } : {}) };
+        });
+        delete q._imgs; continue;
       }
       const letters = cells.map((c) => c.text.replace(/[.)\s]/g, ''));
       if (cells.length >= 2 && letters.every((l, k) => l === String.fromCharCode(65 + k))) {
@@ -788,6 +806,7 @@ function gapAnswerFromStem(examStem, keyStem) {
     }
   }
   const b = String(keyStem || '').match(/<b>([^<]{1,60})<\/b>/);
+  if (b && /^\s*\(?\s*[A-Z][A-Z\s-]*\)?\s*$/.test(stripTags(b[1])) && /[A-Z]{2,}/.test(b[1])) return ''; // từ gốc in đậm, không phải đáp án
   return b ? stripTags(b[1]) : '';
 }
 function gapAnswerFromPassage(raw, n) {
@@ -1060,10 +1079,45 @@ export function applyKeySections(exam, keyBlocks) {
   return count;
 }
 
+/**
+ * File đáp án vừa có bản sao đề vừa có danh sách "1. unloading 2. surrounded" ở cuối:
+ * câu còn thiếu đáp án → tìm đoạn đáp án có cùng lời hướng dẫn, lấy đáp án theo số câu.
+ */
+export function fillFromListSections(exam, keyBlocks) {
+  const isHead = (b) => /^\s*<b>/.test(b.html || '') || ROMAN_RE.test(b.text) || PART_RE.test(b.text) || SECTION_RE.test(b.text) || /^(?:audio|tape)?\s*scripts?\b/i.test(b.text);
+  const heads = keyBlocks.map((b, i) => ({ i, n: normInstr(b.text.replace(/^\s*(?:[IVX]{1,5}|[A-H]|\d{1,2})\s*[.):]\s*/, '').replace(/\(.*$/, '')) })).filter((h) => h.n.length >= 12);
+  let count = 0;
+  for (const p of exam.parts) {
+    const todo = p.questions.filter((q) => !q.answer && q.type !== 'essay' && (q.srcNum ?? q.num) != null);
+    if (!todo.length) continue;
+    const a = normInstr(String(p.instruction).replace(/\(.*$/, ''));
+    if (a.length < 12) continue;
+    let best = null;
+    for (const h of heads) {
+      if (!(h.n === a || h.n.startsWith(a.slice(0, 40)) || a.startsWith(h.n.slice(0, 40)))) continue;
+      const body = [];
+      for (let j = h.i + 1; j < keyBlocks.length && !isHead(keyBlocks[j]); j++) body.push(keyBlocks[j]);
+      const map = parseAnswerKey(body);
+      // bỏ qua bản sao đề (giá trị trùng câu hỏi)
+      const flat = (x) => String(x).toLowerCase().replace(/[^a-z]/g, '');
+      const same = todo.filter((q) => { const v = map.get(q.srcNum ?? q.num); return v && flat(textOf(q.stemHtml)) === flat(v); }).length;
+      const copy = same > 0 && same >= todo.filter((q) => map.has(q.srcNum ?? q.num)).length / 2;
+      const hit = todo.filter((q) => map.has(q.srcNum ?? q.num)).length;
+      if (!copy && hit && (!best || hit > best.hit)) best = { map, hit };
+    }
+    if (!best) continue;
+    for (const q of todo) {
+      const v = best.map.get(q.srcNum ?? q.num);
+      if (v) { Object.assign(q, interpretAnswer(q, v.replace(/^[\s:→\-–]+/, '').trim())); count++; }
+    }
+  }
+  return count;
+}
+
 /** Gắn đáp án: tự chọn dạng "bản sao đề", dạng chia theo phần (đánh số lại mỗi phần) hoặc danh sách "1. B  2. C". */
 export function attachAnswerKey(exam, keyBlocks) {
   const n = applyKeyDocument(exam, keyBlocks);
-  if (n >= 0) return { mode: 'document', count: n };
+  if (n >= 0) return { mode: 'document', count: n + fillFromListSections(exam, keyBlocks) };
   const all = exam.parts.flatMap((p) => p.questions.map((q) => q.num)).filter((x) => x != null);
   const nums = new Set(all);
   if (nums.size !== all.length) {
