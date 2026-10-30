@@ -227,13 +227,13 @@ export function splitOptions(html, firstLetter = 'A') {
     return top;
   };
   let seq = best(collect(/(^|[\s>(])([A-H])\s*[.)]\s+/g));
-  if (!seq || (seq.length < 4 && firstLetter === 'A')) {
+  if (!seq || seq.length < 4) {
     // đề gõ thiếu dấu cách / dấu chấm: "B.Ø/a", "D.the", "D Why not?" – chỉ nhận khi tạo được dãy A B C D trọn vẹn
     const loose = collect(/(^|[\s>(])([A-H])\s*[.)]\s*(?=\S)/g)
       .concat(collect(/(^|[\s>])([C-H])\s+(?=[A-Z“"‘'(])/g)).sort((x, y) => x.start - y.start)
       .filter((x, k, arr) => !k || x.start !== arr[k - 1].start);
     const alt = best(loose);
-    if (alt && alt.length >= 4 && alt.length > (seq?.length || 0)) seq = alt;
+    if (alt && alt.length > (seq?.length || 0) && (alt.length >= 4 || (firstLetter !== 'A' && alt[alt.length - 1].letter >= 'D'))) seq = alt;
   }
   if (!seq) return null;
   const options = seq.map((sq, k) => {
@@ -276,12 +276,13 @@ export function parseExam(blocks, opts = {}) {
   const startQ = (num, html) => {
     ensurePart();
     finishQ();
-    html = html.replace(/([a-z?!.”"'])((?:<[^>]+>)*)A\s*\.(?=[^]*\bB\s*\.[^]*\bC\s*\.[^]*\bD\s*\.)/, '$1 $2A.');
+    let glued = false;
+    html = html.replace(/([a-z?!.”"'_…])((?:<[^>]+>)*)A\s*\.(?=\s*\S[^]*[\s>]B\s*\.\s*\S)/, (m0, c, t) => { glued = true; return `${c} ${t}A.`; });
     q = { num, stemHtml: '', lead: '', options: [], answer: '', accepted: [], explanation: '', notes: [] };
     part.questions.push(q);
     lastNum = num;
     const sp = splitOptions(html);
-    if (sp && (sp.options.length >= 2) && (sp.before === '' || sp.options.length >= 3)) {
+    if (sp && (sp.options.length >= 2) && (sp.before === '' || sp.options.length >= 3 || glued)) {
       q.stemHtml = sp.before; q.options = sp.options;
     } else q.stemHtml = trimHtml(balanceTags(html));
   };
@@ -396,6 +397,16 @@ export function parseExam(blocks, opts = {}) {
       if (cells.length >= 2 && letters.every((l, k) => l === String.fromCharCode(65 + k))) {
         q.options = letters.map((l, k) => ({ key: l, html: q._imgs?.[k] || '', ...(opts.keyMode && /<(b|u)>/.test(cells[k].html) ? { marked: true } : {}) }));
         delete q._imgs; continue;
+      }
+    }
+    if (b.kind === 'row' && part && /true|false|\bT\s*\/?\s*F\b|đúng|sai/i.test(part.instruction)) {
+      const c0 = b.cells[0]?.text || '';
+      const rest = b.cells.slice(1).map((c) => c.text.trim());
+      if (/^(?:statements?|câu|sentences?)$/i.test(c0.trim()) && rest.every((t) => /^(?:T|F|NG|True|False|Not given|Đúng|Sai|)$/i.test(t))) continue; // hàng tiêu đề
+      const qm = c0.match(QNUM_RE);
+      if (qm && rest.every((t) => !t || /^(?:T|F|NG|True|False|Not given|Đúng|Sai|✓|✔|x)$/i.test(t))) {
+        startQ(+qm[1], b.cells[0].html.replace(/^\s*(?:<[^>]+>)*\s*(?:Question|Câu|Q)?\s*\d{1,3}\s*[.):]\s*/i, ''));
+        finishQ(); continue;
       }
     }
     if (b.kind === 'row') {
@@ -1084,8 +1095,8 @@ export function applyKeySections(exam, keyBlocks) {
  * câu còn thiếu đáp án → tìm đoạn đáp án có cùng lời hướng dẫn, lấy đáp án theo số câu.
  */
 export function fillFromListSections(exam, keyBlocks) {
-  const isHead = (b) => /^\s*<b>/.test(b.html || '') || ROMAN_RE.test(b.text) || PART_RE.test(b.text) || SECTION_RE.test(b.text) || /^(?:audio|tape)?\s*scripts?\b/i.test(b.text);
-  const heads = keyBlocks.map((b, i) => ({ i, n: normInstr(b.text.replace(/^\s*(?:[IVX]{1,5}|[A-H]|\d{1,2})\s*[.):]\s*/, '').replace(/\(.*$/, '')) })).filter((h) => h.n.length >= 12);
+  const isHead = (b) => /^\s*<b>\s*[^<\s]/.test(b.html || '') || ROMAN_RE.test(b.text) || PART_RE.test(b.text) || SECTION_RE.test(b.text) || /^(?:audio|tape)?\s*scripts?\b/i.test(b.text);
+  const heads = keyBlocks.map((b, i) => ({ i, n: normInstr(b.text.replace(/^\s*(?:(?:[IVX]{1,5}|[A-H]|\d{1,2})\s*[.):]\s*)+/, '').replace(/\(.*$/, '')) })).filter((h) => h.n.length >= 12);
   let count = 0;
   for (const p of exam.parts) {
     const todo = p.questions.filter((q) => !q.answer && q.type !== 'essay' && (q.srcNum ?? q.num) != null);
@@ -1096,6 +1107,9 @@ export function fillFromListSections(exam, keyBlocks) {
     for (const h of heads) {
       if (!(h.n === a || h.n.startsWith(a.slice(0, 40)) || a.startsWith(h.n.slice(0, 40)))) continue;
       const body = [];
+      // đáp án ghi ngay trên dòng tiêu đề: "III. Choose … (1.2 pt) (0,2 pt for one correct answer) 1. D 2. B …"
+      const tail = keyBlocks[h.i].text.replace(/^[\s\S]*\)\s*(?=\d{1,3}\s*[.):\-])/, '');
+      if (tail !== keyBlocks[h.i].text) body.push({ kind: 'p', text: tail, html: tail });
       for (let j = h.i + 1; j < keyBlocks.length && !isHead(keyBlocks[j]); j++) body.push(keyBlocks[j]);
       const map = parseAnswerKey(body);
       // bỏ qua bản sao đề (giá trị trùng câu hỏi)

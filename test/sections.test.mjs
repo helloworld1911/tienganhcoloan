@@ -179,4 +179,29 @@ ok(q3[2].options.length === 4 && q3[2].answer === 'A', 'phương án dính cuố
 ok(q3[3].answer === 'D', 'bản sao đề in đậm cả chữ A B C D: chỉ nhận phương án in đậm cả nội dung');
 ok(ex3.parts.find((p) => p.topic === 'word_form')?.questions[0].answer === 'unloading', '"form of the word given" là từ loại; từ gốc in đậm không phải đáp án; lấy đáp án ở danh sách cuối file');
 ok(/so don't comment/.test(q3[5].answer), 'đáp án ghép câu chỉ có ở danh sách cuối file');
+
+// ---- Đề 4: câu Đúng/Sai trong bảng; đáp án ghi ngay trên dòng tiêu đề; tiêu đề đáp án "I. I. Listen…"; phương án dính / thiếu dấu cách ở 2 dòng
+const ex4Html = `
+<p>I. Listen to Henry talking about his new school and decide whether the following statements are true (T) or false (F). (1.0 pt)</p>
+<table>${row('Statements', 'T', 'F')}${row('1. The classrooms are small and dark.', '', '')}${row('2. Students can play sports in the playground.', '', '')}</table>
+<p><b>II. Listen to Trang talking about her friend and mark the letter A, B, C, or D to indicate the correct answer.</b></p>
+<p>1. Trang's friend has _____.A. short black hair B. bright eyes and an oval face</p><p>C. big eyes and black hair D. bright eyes and curly hair</p>
+<p>2. Both Trang and her friend like ____________.</p><p>A. manga reading B. flower arranging</p><p>C. skiing D.paper folding</p>
+<p><b>II. Choose the odd one out. (0.4 pt)</b></p>
+<p>1. A. friendly B. talkative C. creative D. boring</p>
+<p><b>KEY</b></p>
+<p>I. I. Listen to Henry talking about his new school and decide whether the following statements are true (T) or false (F). (1.0 pt)</p>
+<p>1- F 2. T</p>
+<p><b>II. Listen to Trang talking about her friend and mark the letter A, B, C, or D to indicate the correct answer.</b></p>
+<p>1. B 2. A</p>
+<p><b>II. Choose the odd one out. (0.4pt) </b>(<i>0,2 pts for one correct answer) </i>1. D</p>
+`;
+const sp4 = splitEmbeddedKey(htmlToBlocks(ex4Html));
+const ex4 = parseExam(sp4.exam, { fileName: 'de4.docx' });
+attachAnswerKey(ex4, sp4.key); finalizeExam(ex4);
+const q4 = ex4.parts.flatMap((p) => p.questions);
+ok(q4.slice(0, 2).every((q) => q.type === 'tf') && q4[0].stemHtml.startsWith('The classrooms') && q4.slice(0, 2).map((q) => q.answer).join('') === 'FT', 'câu Đúng/Sai nằm trong bảng; tiêu đề đáp án gõ lặp "I. I. Listen…"');
+ok(q4[2].options.length === 4 && q4[2].options[1].html.startsWith('bright eyes') && q4[2].answer === 'B', 'phương án dính cuối câu chỉ có A, B trên dòng đầu, C, D ở dòng sau');
+ok(q4[3].options.map((o) => o.html).join('|') === 'manga reading|flower arranging|skiing|paper folding' && q4[3].answer === 'A', 'phương án thiếu dấu cách ở dòng sau ("C. skiing D.paper folding")');
+ok(q4[4].answer === 'D', 'đáp án ghi ngay trên dòng tiêu đề "(0,2 pts for one correct answer) 1. D"');
 console.log('\nTất cả kiểm thử đề chia phần đều đạt ✔');
