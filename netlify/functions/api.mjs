@@ -768,7 +768,7 @@ route('POST', '/attempts/:id/grade', 'staff', async ({ params, body, user }) => 
 });
 route('DELETE', '/attempts/:id', 'staff', async ({ params }) => { await q('DELETE FROM attempts WHERE id=$1', [params.id]); });
 
-// Chấm lại các câu điền/viết đã nộp theo quy tắc so khớp hiện tại (chỉ nâng sai → đúng, không đụng câu giáo viên đã chấm tay)
+// Chấm lại các câu điền/viết đã nộp theo quy tắc so khớp hiện tại (không đụng câu giáo viên đã chấm tay)
 route('POST', '/attempts/regrade-text', 'staff', async () => {
   const rows = await q(`SELECT t.id, t.kind, t.results, t.content, e.content AS exam_content FROM attempts t LEFT JOIN exams e ON e.id=t.exam_id
                         WHERE t.status='submitted' AND t.results IS NOT NULL`);
@@ -780,11 +780,11 @@ route('POST', '/attempts/regrade-text', 'staff', async () => {
     const results = t.results || [];
     const changed = [];
     for (const r of results) {
-      if (r.correct !== false || r.manual || r.pending || !['gap', 'rewrite'].includes(r.type)) continue;
+      if (r.manual || r.pending || !['gap', 'rewrite'].includes(r.type)) continue;
       const qq = qs.get(r.id);
-      if (!qq || !r.given) continue;
-      const g = gradeQuestion(qq, r.given);
-      if (g.correct) { r.correct = true; r.earned = r.max; changed.push({ qid: r.id, earned: r.earned, correct: true }); }
+      if (!qq) continue;
+      const g = gradeQuestion(qq, r.given || '');
+      if (!!g.correct !== !!r.correct) { r.correct = !!g.correct; r.earned = g.correct ? r.max : 0; changed.push({ qid: r.id, earned: r.earned, correct: r.correct }); }
     }
     if (!changed.length) continue;
     const tt = totals(results);

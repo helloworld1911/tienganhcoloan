@@ -27,24 +27,6 @@ const words = (s) => {
 };
 const loose = (s) => words(s).join('');
 
-function lev1(a, b) { // khoảng cách sửa ≤ 1 (thêm/bớt/đổi một chữ cái)
-  if (a === b) return true;
-  if (Math.abs(a.length - b.length) > 1) return false;
-  let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++;
-  if (a.length === b.length) return a.slice(i + 1) === b.slice(i + 1);
-  return a.length > b.length ? a.slice(i + 1) === b.slice(i) : a.slice(i) === b.slice(i + 1);
-}
-// Câu viết (viết lại câu / dựng câu): bỏ qua MỘT lỗi gõ nhỏ trong một từ dài (≥ 5 chữ cái),
-// nhưng không bỏ qua khác biệt ở đuôi từ (-s, -es, -ed, -ing, -er…) vì đó thường là lỗi ngữ pháp.
-function oneTypo(a, b) {
-  if (a.length !== b.length) return false;
-  let diff = -1;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { if (diff >= 0) return false; diff = i; }
-  if (diff < 0) return true;
-  const x = a[diff], y = b[diff];
-  return Math.min(x.length, y.length) >= 5 && x.slice(0, 2) === y.slice(0, 2) && x.slice(-2) === y.slice(-2) && lev1(x, y);
-}
-
 const compose = (lead, x) => {
   if (!lead) return x;
   if (/_{2,}/.test(lead)) return lead.replace(/_{2,}/, x);
@@ -61,11 +43,7 @@ export function isTextCorrect(q, given) {
   for (const a of accepted) { keys.push(a); if (q.lead) keys.push(compose(q.lead, a)); }
   const ck = new Set(cands.map(loose).filter(Boolean));
   if (keys.some((k) => ck.has(loose(k)))) return true;
-  if (q.type === 'rewrite') {
-    const cw = cands.map(words);
-    if (keys.some((k) => { const kw = words(k); return cw.some((w) => oneTypo(w, kw)); })) return true;
-  }
-  return false;
+  return false; // sai chính tả (kể cả thiếu một chữ cái) vẫn tính là sai
 }
 
 /** Chấm một câu. */
