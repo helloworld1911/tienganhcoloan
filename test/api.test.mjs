@@ -114,6 +114,8 @@ const ar = await call('GET', `/assignments/${asg[0].id}/results`);
 ok(ar.students.length === 2 && ar.items.length > 30, 'kết quả theo bài + phân tích câu hỏi');
 const csv = await call('GET', `/export/class/${c6a.id}`);
 ok(csv.includes('Nguyễn An') && csv.includes('điểm /10') && !csv.includes('Trung bình') && !csv.includes('(%)'), 'xuất CSV (5 bài gần nhất, thang 10, không có điểm TB)');
+const rg = await call('POST', '/attempts/regrade-text');
+ok(typeof rg.attempts === 'number' && typeof rg.fixed === 'number', 'chấm lại câu điền/viết theo quy tắc mới');
 
 // 6b. Giao bài trùng (bấm nhiều lần) chỉ tạo 1 bài
 const again = await call('POST', '/assignments', { examId: saved.id, classIds: [c6a.id], showAnswers: 'after_submit' });

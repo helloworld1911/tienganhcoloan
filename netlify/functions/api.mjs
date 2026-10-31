@@ -3,7 +3,7 @@
 // ============================================================================
 import { q, one, batch, ensureSchema, pingDb, driverKind } from '../lib/db.mjs';
 import { hashPassword, verifyPassword, needsRehash, signToken, verifyToken, randomCode } from '../lib/auth.mjs';
-import { gradeAttempt, totals, stripAnswers } from '../lib/grade.mjs';
+import { gradeAttempt, gradeQuestion, totals, stripAnswers } from '../lib/grade.mjs';
 import { putChunk, getChunk, deletePrefix, storageInfo } from '../lib/storage.mjs';
 import { driveId, directUrl, fetchRange } from '../lib/remote-audio.mjs';
 import crypto from 'node:crypto';
@@ -767,6 +767,36 @@ route('POST', '/attempts/:id/grade', 'staff', async ({ params, body, user }) => 
   return attemptView(t.id, user);
 });
 route('DELETE', '/attempts/:id', 'staff', async ({ params }) => { await q('DELETE FROM attempts WHERE id=$1', [params.id]); });
+
+// Chấm lại các câu điền/viết đã nộp theo quy tắc so khớp hiện tại (chỉ nâng sai → đúng, không đụng câu giáo viên đã chấm tay)
+route('POST', '/attempts/regrade-text', 'staff', async () => {
+  const rows = await q(`SELECT t.id, t.kind, t.results, t.content, e.content AS exam_content FROM attempts t LEFT JOIN exams e ON e.id=t.exam_id
+                        WHERE t.status='submitted' AND t.results IS NOT NULL`);
+  let attempts = 0, fixed = 0;
+  for (const t of rows) {
+    const content = t.kind === 'practice' ? t.content : t.exam_content;
+    if (!content) continue;
+    const qs = new Map((content.parts || []).flatMap((p) => (p.questions || []).map((x) => [x.id, x])));
+    const results = t.results || [];
+    const changed = [];
+    for (const r of results) {
+      if (r.correct !== false || r.manual || r.pending || !['gap', 'rewrite'].includes(r.type)) continue;
+      const qq = qs.get(r.id);
+      if (!qq || !r.given) continue;
+      const g = gradeQuestion(qq, r.given);
+      if (g.correct) { r.correct = true; r.earned = r.max; changed.push({ qid: r.id, earned: r.earned, correct: true }); }
+    }
+    if (!changed.length) continue;
+    const tt = totals(results);
+    await batch([
+      ['UPDATE attempts SET results=$1, score=$2, max_score=$3, percent=$4 WHERE id=$5', [JSON.stringify(results), tt.score, tt.max, tt.percent, t.id]],
+      [`UPDATE attempt_items i SET earned=x.earned, correct=x.correct FROM jsonb_to_recordset($2::jsonb) AS x(qid text, earned numeric, correct boolean)
+        WHERE i.attempt_id=$1 AND i.qid=x.qid`, [t.id, JSON.stringify(changed)]],
+    ]);
+    attempts++; fixed += changed.length;
+  }
+  return { attempts, fixed };
+});
 
 // ================================================================ DASHBOARD
 route('GET', '/dashboard/overview', 'staff', async () => {

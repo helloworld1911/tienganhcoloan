@@ -16,6 +16,35 @@ export function normalize(s) {
   return t.replace(/[,;:"]/g, '').replace(/\s+/g, ' ').trim();
 }
 
+// So khớp "dễ": bỏ qua hoàn toàn khoảng trắng và dấu câu (chấm, phẩy, gạch nối, nháy…),
+// chỉ so chữ cái + chữ số sau khi đã mở các dạng viết tắt (don't = do not).
+// viết tắt thiếu dấu nháy: dont, doesnt, isnt, cant, wont, im…
+const NO_APOS = [[/\b(do|does|did|is|are|was|were|has|have|had|could|would|should|must|need)nt\b/g, '$1 not'], [/\bcant\b/g, 'can not'], [/\bwont\b/g, 'will not'], [/\bim\b/g, 'i am']];
+const words = (s) => {
+  let t = normalize(s);
+  for (const [re, rep] of NO_APOS) t = t.replace(re, rep);
+  return t.replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(' ').filter(Boolean);
+};
+const loose = (s) => words(s).join('');
+
+function lev1(a, b) { // khoảng cách sửa ≤ 1 (thêm/bớt/đổi một chữ cái)
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  if (a.length === b.length) return a.slice(i + 1) === b.slice(i + 1);
+  return a.length > b.length ? a.slice(i + 1) === b.slice(i) : a.slice(i) === b.slice(i + 1);
+}
+// Câu viết (viết lại câu / dựng câu): bỏ qua MỘT lỗi gõ nhỏ trong một từ dài (≥ 5 chữ cái),
+// nhưng không bỏ qua khác biệt ở đuôi từ (-s, -es, -ed, -ing, -er…) vì đó thường là lỗi ngữ pháp.
+function oneTypo(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = -1;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { if (diff >= 0) return false; diff = i; }
+  if (diff < 0) return true;
+  const x = a[diff], y = b[diff];
+  return Math.min(x.length, y.length) >= 5 && x.slice(0, 2) === y.slice(0, 2) && x.slice(-2) === y.slice(-2) && lev1(x, y);
+}
+
 const compose = (lead, x) => {
   if (!lead) return x;
   if (/_{2,}/.test(lead)) return lead.replace(/_{2,}/, x);
@@ -26,11 +55,16 @@ export function isTextCorrect(q, given) {
   if (!given || !String(given).trim()) return false;
   const accepted = (q.accepted && q.accepted.length ? q.accepted : [q.answer]).filter(Boolean);
   if (!accepted.length) return false;
-  const cands = new Set([normalize(given)]);
-  if (q.lead) cands.add(normalize(compose(q.lead, given)));
-  const keys = new Set();
-  for (const a of accepted) { keys.add(normalize(a)); if (q.lead) keys.add(normalize(compose(q.lead, a))); }
-  for (const c of cands) if (keys.has(c)) return true;
+  const cands = [String(given)];
+  if (q.lead) cands.push(compose(q.lead, given));
+  const keys = [];
+  for (const a of accepted) { keys.push(a); if (q.lead) keys.push(compose(q.lead, a)); }
+  const ck = new Set(cands.map(loose).filter(Boolean));
+  if (keys.some((k) => ck.has(loose(k)))) return true;
+  if (q.type === 'rewrite') {
+    const cw = cands.map(words);
+    if (keys.some((k) => { const kw = words(k); return cw.some((w) => oneTypo(w, kw)); })) return true;
+  }
   return false;
 }
 
