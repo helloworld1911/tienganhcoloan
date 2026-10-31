@@ -68,11 +68,11 @@ export function drawProgress(canvas, attempts, classAvg) {
     data: {
       labels: list.map((t) => fmtDate(t.submitted_at, false)),
       datasets: [
-        { label: 'Điểm (%)', data: list.map((t) => +t.percent), borderColor: '#3156d3', backgroundColor: 'rgba(49,86,211,.12)', fill: true, tension: .3, pointRadius: 4 },
-        ...(classAvg != null ? [{ label: 'TB lớp', data: list.map(() => classAvg), borderColor: '#ffb84d', borderDash: [6, 4], pointRadius: 0 }] : []),
+        { label: 'Điểm (thang 10)', data: list.map((t) => +t.percent / 10), borderColor: '#3156d3', backgroundColor: 'rgba(49,86,211,.12)', fill: true, tension: .3, pointRadius: 4 },
+        ...(classAvg != null ? [{ label: 'TB lớp', data: list.map(() => classAvg / 10), borderColor: '#ffb84d', borderDash: [6, 4], pointRadius: 0 }] : []),
       ],
     },
-    options: { scales: { y: { min: 0, max: 100 } }, plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { title: (i) => list[i[0].dataIndex].title } } } },
+    options: { scales: { y: { min: 0, max: 10 } }, plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { title: (i) => list[i[0].dataIndex].title } } } },
   });
 }
 
@@ -125,7 +125,7 @@ export async function history() {
       <div class="card"><h3>Theo chuyên đề (toàn bộ)</h3>${topicRows(stats.topics)}</div></div>
     <div class="card"><div class="table-wrap"><table class="t"><thead><tr><th>Bài</th><th>Loại</th><th>Điểm</th><th>Thang 10</th><th>Thời gian</th><th>Nộp lúc</th></tr></thead><tbody>
     ${list.map((t) => `<tr class="click" data-href="#/result/${t.id}"><td>${esc(t.title)}</td><td>${t.kind === 'practice' ? '<span class="chip blue">Luyện tập</span>' : '<span class="chip">Bài giao</span>'}</td>
-      <td>${t.score}/${t.max_score} · ${pct(t.percent)}${t.needs_grading ? ' <span class="chip warn">chờ chấm</span>' : ''}</td><td><b>${score10(t.percent)}</b></td><td>${fmtDur(t.duration_sec)}</td><td>${fmtAgo(t.submitted_at)}</td></tr>`).join('')
+      <td>${t.score}/${t.max_score}${t.needs_grading ? ' <span class="chip warn">chờ chấm</span>' : ''}</td><td><b>${score10(t.percent)}</b></td><td>${fmtDur(t.duration_sec)}</td><td>${fmtAgo(t.submitted_at)}</td></tr>`).join('')
       || '<tr><td colspan="6" class="empty">Chưa có bài nào</td></tr>'}
     </tbody></table></div></div>`);
   drawProgress($('#prog', main), stats.attempts, stats.classAvg);

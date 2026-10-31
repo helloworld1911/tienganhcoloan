@@ -34,9 +34,10 @@ export function fmtDur(sec) {
   return m >= 60 ? `${Math.floor(m / 60)}g ${m % 60}p` : `${m}p ${String(s).padStart(2, '0')}s`;
 }
 export const pctClass = (p) => (p == null ? '' : p >= 80 ? 'hi' : p >= 50 ? 'mid' : 'lo');
-export const pct = (p) => (p == null || p === '' ? '<span class="muted">—</span>' : `<span class="pct ${pctClass(+p)}">${Math.round(+p * 10) / 10}%</span>`);
+// Điểm hiển thị theo thang 10 (dữ liệu lưu dưới dạng %, 0–100)
+export const pct = (p) => (p == null || p === '' ? '<span class="muted">—</span>' : `<span class="pct ${pctClass(+p)}">${score10(p)}</span>`);
 export const bar = (p) => `<div class="bar ${pctClass(p)}"><i style="width:${Math.max(0, Math.min(100, p || 0))}%"></i></div>`;
-export const score10 = (p) => (p == null ? '—' : (Math.round(+p) / 10).toFixed(1));
+export function score10(p) { return p == null || p === '' ? '—' : (Math.round(+p) / 10).toFixed(1); }
 
 export function modal(html, { wide = false, onMount } = {}) {
   return new Promise((resolve) => {

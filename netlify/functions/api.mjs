@@ -851,7 +851,7 @@ route('GET', '/export/class/:id', 'staff', async ({ params }) => {
   const cid = int(params.id);
   const [cls, assigns, students, best] = await Promise.all([
     one('SELECT * FROM classes WHERE id=$1', [cid]),
-    q(`SELECT a.id, COALESCE(a.title,e.title) AS title FROM assignments a JOIN exams e ON e.id=a.exam_id WHERE a.class_id=$1 ORDER BY a.created_at`, [cid]),
+    q(`SELECT a.id, COALESCE(a.title,e.title) AS title, a.created_at FROM assignments a JOIN exams e ON e.id=a.exam_id WHERE a.class_id=$1 ORDER BY a.created_at`, [cid]),
     q(`SELECT id, full_name, username FROM users WHERE class_id=$1 AND role='student' ORDER BY full_name`, [cid]),
     q(`SELECT t.user_id, t.assignment_id, max(t.percent)::float AS best FROM attempts t JOIN assignments a ON a.id=t.assignment_id
        WHERE a.class_id=$1 AND t.status='submitted' GROUP BY t.user_id, t.assignment_id`, [cid]),
@@ -859,11 +859,18 @@ route('GET', '/export/class/:id', 'staff', async ({ params }) => {
   if (!cls) fail(404, 'Không tìm thấy lớp');
   const map = new Map(best.map((b) => [`${b.user_id}-${b.assignment_id}`, b.best]));
   const esc = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`;
-  const rows = [['STT', 'Họ tên', 'Tên đăng nhập', ...assigns.map((a) => a.title + ' (%)'), 'Trung bình (%)']];
+  // 5 bài giao gần nhất (xếp từ cũ đến mới), điểm cao nhất của mỗi em quy về thang 10, dấu phẩy thập phân kiểu Việt Nam
+  const recent = assigns.slice(-5);
+  const d2 = (v) => {
+    const t = v ? new Date(v) : null;
+    if (!t || isNaN(t)) return '';
+    const vn = new Date(t.getTime() + 7 * 3600e3); // giờ Việt Nam
+    return `${String(vn.getUTCDate()).padStart(2, '0')}/${String(vn.getUTCMonth() + 1).padStart(2, '0')}`;
+  };
+  const ten = (v) => (v == null ? '' : (Math.round(v) / 10).toFixed(1).replace('.', ','));
+  const rows = [['STT', 'Họ tên', 'Tên đăng nhập', ...recent.map((a) => `${a.title} (giao ${d2(a.created_at)}) – điểm /10`)]];
   students.forEach((s, i) => {
-    const vals = assigns.map((a) => map.get(`${s.id}-${a.id}`));
-    const done = vals.filter((v) => v != null);
-    rows.push([i + 1, s.full_name, s.username, ...vals.map((v) => (v == null ? '' : v)), done.length ? Math.round((done.reduce((x, y) => x + y, 0) / done.length) * 10) / 10 : '']);
+    rows.push([i + 1, s.full_name, s.username, ...recent.map((a) => ten(map.get(`${s.id}-${a.id}`)))]);
   });
   const csv = '﻿' + rows.map((r) => r.map(esc).join(',')).join('\r\n');
   return new Response(csv, { headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="ket-qua-lop-${cls.id}.csv"` } });

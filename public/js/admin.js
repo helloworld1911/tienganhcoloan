@@ -59,7 +59,7 @@ export async function dashboard() {
         const comp = expected ? Math.round((c.done_pairs / expected) * 100) : null;
         return `<tr class="click" data-href="#/admin/class/${c.id}"><td><b>${esc(c.name)}</b></td><td>${c.grade ?? '—'}</td><td>${c.students}</td><td>${c.assignments}</td>
           <td style="min-width:140px">${comp == null ? '—' : `<div class="row" style="gap:8px">${bar(comp)}<span class="small">${comp}%</span></div>`}</td>
-          <td>${pct(c.avg_percent)} <span class="muted small">(${score10(c.avg_percent)}đ)</span></td><td>${c.week_submissions}</td></tr>`;
+          <td>${pct(c.avg_percent)}</td><td>${c.week_submissions}</td></tr>`;
       }).join('') || '<tr><td colspan="7" class="empty">Chưa có lớp</td></tr>'}</tbody></table></div></div>
       <div class="grid g2">
         <div class="card"><h3>Điểm trung bình theo tuần</h3><div class="chart-box"><canvas id="trend"></canvas></div></div>
@@ -72,8 +72,8 @@ export async function dashboard() {
     if (!weeks.length) { $('#trend', main).parentElement.innerHTML = '<div class="empty small">Chưa có bài nộp</div>'; return; }
     chart($('#trend', main), {
       type: 'line',
-      data: { labels: weeks.map((w) => 'Tuần ' + fmtDate(w, false)), datasets: gs.map((g, i) => ({ label: gradeName(g), data: weeks.map((w) => tr.find((t) => t.week === w && t.grade === g)?.avg ?? null), borderColor: COLORS[i % COLORS.length], tension: .3, spanGaps: true })) },
-      options: { scales: { y: { min: 0, max: 100 } }, plugins: { legend: { position: 'bottom' } } },
+      data: { labels: weeks.map((w) => 'Tuần ' + fmtDate(w, false)), datasets: gs.map((g, i) => ({ label: gradeName(g), data: weeks.map((w) => { const x = tr.find((t) => t.week === w && t.grade === g); return x?.avg == null ? null : x.avg / 10; }), borderColor: COLORS[i % COLORS.length], tension: .3, spanGaps: true })) },
+      options: { scales: { y: { min: 0, max: 10 } }, plugins: { legend: { position: 'bottom' } } },
     });
   };
   draw();
@@ -239,9 +239,9 @@ export async function classDetail({ id }) {
         <div class="card"><h3>Biểu đồ</h3><div class="chart-box"><canvas id="radar"></canvas></div></div></div>
         <div class="card mt"><h3>Bản đồ nhiệt: học sinh × chuyên đề</h3><p class="small muted">Ô đỏ là chuyên đề học sinh còn yếu.</p><div class="table-wrap">
         <table class="heat"><thead><tr><th></th>${topicsUsed.map((t) => `<th class="rot">${esc(topicLabel(t))}</th>`).join('')}</tr></thead><tbody>
-        ${d.students.map((s) => `<tr><th><a href="#/admin/student/${s.id}">${esc(s.full_name)}</a></th>${topicsUsed.map((t) => { const v = st[`${s.id}-${t}`]; return `<td style="background:${heatColor(v)}">${v ?? ''}</td>`; }).join('')}</tr>`).join('')}
+        ${d.students.map((s) => `<tr><th><a href="#/admin/student/${s.id}">${esc(s.full_name)}</a></th>${topicsUsed.map((t) => { const v = st[`${s.id}-${t}`]; return `<td style="background:${heatColor(v)}">${v == null ? '' : score10(v)}</td>`; }).join('')}</tr>`).join('')}
         </tbody></table></div></div>`;
-      if (d.topics.length >= 3) chart($('#radar', el), { type: 'radar', data: { labels: d.topics.map((t) => topicLabel(t.topic)), datasets: [{ label: 'Độ chính xác %', data: d.topics.map((t) => Math.round((t.earned / t.max) * 100)), borderColor: '#3156d3', backgroundColor: 'rgba(49,86,211,.15)' }] }, options: { scales: { r: { min: 0, max: 100 } }, plugins: { legend: { display: false } } } });
+      if (d.topics.length >= 3) chart($('#radar', el), { type: 'radar', data: { labels: d.topics.map((t) => topicLabel(t.topic)), datasets: [{ label: 'Điểm (thang 10)', data: d.topics.map((t) => Math.round((t.earned / t.max) * 100) / 10), borderColor: '#3156d3', backgroundColor: 'rgba(49,86,211,.15)' }] }, options: { scales: { r: { min: 0, max: 10 } }, plugins: { legend: { display: false } } } });
       else $('#radar', el).parentElement.innerHTML = '<div class="empty small">Cần ít nhất 3 chuyên đề</div>';
     } else if (tab === 'assign') {
       el.innerHTML = `<div class="row mb"><a class="btn accent" href="#/admin/assignments?class=${c.id}">+ Giao bài mới</a></div><div class="card"><table class="t"><thead><tr><th>Bài</th><th>Hạn</th><th>Đã nộp</th><th>Điểm TB</th></tr></thead><tbody>
@@ -250,9 +250,9 @@ export async function classDetail({ id }) {
     } else {
       el.innerHTML = `<div class="card"><h3>Điểm trung bình của lớp theo tuần</h3><div class="chart-box"><canvas id="tr"></canvas></div></div>
         <div class="card mt"><h3>Điểm trung bình từng bài</h3><div class="chart-box"><canvas id="ab"></canvas></div></div>`;
-      if (d.trend.length) chart($('#tr', el), { type: 'line', data: { labels: d.trend.map((t) => 'Tuần ' + fmtDate(t.week, false)), datasets: [{ label: 'Điểm TB (%)', data: d.trend.map((t) => t.avg), borderColor: '#ff6b4a', backgroundColor: 'rgba(255,107,74,.12)', fill: true, tension: .3 }, { label: 'Số lượt nộp', data: d.trend.map((t) => t.n), borderColor: '#64748b', borderDash: [4, 4], yAxisID: 'y2' }] }, options: { scales: { y: { min: 0, max: 100 }, y2: { position: 'right', grid: { display: false } } }, plugins: { legend: { position: 'bottom' } } } });
+      if (d.trend.length) chart($('#tr', el), { type: 'line', data: { labels: d.trend.map((t) => 'Tuần ' + fmtDate(t.week, false)), datasets: [{ label: 'Điểm TB (thang 10)', data: d.trend.map((t) => (t.avg == null ? null : t.avg / 10)), borderColor: '#ff6b4a', backgroundColor: 'rgba(255,107,74,.12)', fill: true, tension: .3 }, { label: 'Số lượt nộp', data: d.trend.map((t) => t.n), borderColor: '#64748b', borderDash: [4, 4], yAxisID: 'y2' }] }, options: { scales: { y: { min: 0, max: 10 }, y2: { position: 'right', grid: { display: false } } }, plugins: { legend: { position: 'bottom' } } } });
       const as = d.assignments.filter((a) => a.avg_percent != null);
-      if (as.length) chart($('#ab', el), { type: 'bar', data: { labels: as.map((a) => a.title.slice(0, 30)), datasets: [{ label: 'Điểm TB (%)', data: as.map((a) => +a.avg_percent), backgroundColor: '#3156d3', borderRadius: 6 }] }, options: { scales: { y: { min: 0, max: 100 } }, plugins: { legend: { display: false } } } });
+      if (as.length) chart($('#ab', el), { type: 'bar', data: { labels: as.map((a) => a.title.slice(0, 30)), datasets: [{ label: 'Điểm TB (thang 10)', data: as.map((a) => +a.avg_percent / 10), backgroundColor: '#3156d3', borderRadius: 6 }] }, options: { scales: { y: { min: 0, max: 10 } }, plugins: { legend: { display: false } } } });
     }
   };
   draw();
@@ -377,15 +377,15 @@ export async function studentDetail({ id }) {
     <div class="grid g4 mb">
       <div class="card kpi accent"><span class="v">${score10(avg)}</span><span class="l">điểm TB bài giao (thang 10)</span></div>
       <div class="card kpi"><span class="v">${asg.length}</span><span class="l">lượt làm bài · ${d.pendingAssignments} bài chưa làm</span></div>
-      <div class="card kpi"><span class="v">${delta == null ? '—' : (delta >= 0 ? '▲ ' : '▼ ') + Math.abs(Math.round(delta)) + '%'}</span><span class="l">thay đổi (3 bài đầu → 3 bài gần nhất)</span></div>
+      <div class="card kpi"><span class="v">${delta == null ? '—' : (delta >= 0 ? '▲ ' : '▼ ') + (Math.abs(delta) / 10).toFixed(1) + ' điểm'}</span><span class="l">thay đổi (3 bài đầu → 3 bài gần nhất)</span></div>
       <div class="card kpi"><span class="v">${d.attempts.length - asg.length}</span><span class="l">lượt luyện tập chuyên đề</span></div>
     </div>
     <div class="grid g2 mb"><div class="card"><h3>Tiến trình điểm số</h3><div class="chart-box"><canvas id="prog"></canvas></div></div>
       <div class="card"><h3>Theo chuyên đề</h3>${topicRows(d.topics)}
-        ${weak.length ? `<div class="hint mt">Cần củng cố: <b>${weak.slice(0, 3).filter((w) => w.p < 70).map((w) => esc(topicLabel(w.topic))).join(', ') || 'không có chuyên đề nào dưới 70% 👍'}</b></div>` : ''}</div></div>
+        ${weak.length ? `<div class="hint mt">Cần củng cố: <b>${weak.slice(0, 3).filter((w) => w.p < 70).map((w) => esc(topicLabel(w.topic))).join(', ') || 'không có chuyên đề nào dưới 7 điểm 👍'}</b></div>` : ''}</div></div>
     <div class="card"><h3>Lịch sử làm bài</h3><div class="table-wrap"><table class="t"><thead><tr><th>Bài</th><th>Loại</th><th>Điểm</th><th>Thang 10</th><th>Nộp lúc</th></tr></thead><tbody>
       ${[...d.attempts].reverse().map((t) => `<tr class="click" data-href="#/admin/attempt/${t.id}"><td>${esc(t.title)}</td><td>${t.kind === 'practice' ? '<span class="chip blue">Luyện tập</span>' : '<span class="chip">Bài giao</span>'}</td>
-        <td>${t.score}/${t.max_score} · ${pct(t.percent)}${t.needs_grading ? ' <span class="chip warn">chờ chấm</span>' : ''}</td><td><b>${score10(t.percent)}</b></td><td>${fmtDate(t.submitted_at)}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Chưa làm bài nào</td></tr>'}
+        <td>${t.score}/${t.max_score}${t.needs_grading ? ' <span class="chip warn">chờ chấm</span>' : ''}</td><td><b>${score10(t.percent)}</b></td><td>${fmtDate(t.submitted_at)}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">Chưa làm bài nào</td></tr>'}
     </tbody></table></div></div>`);
   drawProgress($('#prog', main), d.attempts, d.classAvg);
   clickRows(main);

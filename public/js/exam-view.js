@@ -276,7 +276,7 @@ export async function result({ id }) {
       <div class="card scorebox">
         <div class="ring" style="--p:${p};--c:${color}"><div><div><b>${score10(p)}</b><br><span class="small muted">/ 10 điểm</span></div></div></div>
         <div>
-          <div class="kpi"><span class="v">${d.score} / ${d.maxScore}</span><span class="l">điểm theo đề (${pct(p)})</span></div>
+          <div class="kpi"><span class="v">${d.score} / ${d.maxScore}</span><span class="l">số điểm đạt được / tổng điểm của đề</span></div>
           <div class="row mt-s"><span class="chip good">✓ ${right} đúng</span><span class="chip bad">✗ ${wrong} sai</span>${pendingN ? `<span class="chip warn">⏳ ${pendingN} chờ chấm</span>` : ''}</div>
           ${d.needsGrading ? '<p class="small muted mt-s">Điểm sẽ được cập nhật khi cô Loan chấm phần tự luận.</p>' : ''}
           ${!d.showAnswers ? '<p class="small muted mt-s">Đáp án sẽ được hiển thị sau khi hết hạn nộp bài.</p>' : ''}
