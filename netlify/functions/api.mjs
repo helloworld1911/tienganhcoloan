@@ -5,6 +5,7 @@ import { q, one, batch, ensureSchema, pingDb, driverKind } from '../lib/db.mjs';
 import { hashPassword, verifyPassword, needsRehash, signToken, verifyToken, randomCode } from '../lib/auth.mjs';
 import { gradeAttempt, gradeQuestion, totals, stripAnswers } from '../lib/grade.mjs';
 import { putChunk, getChunk, deletePrefix, storageInfo } from '../lib/storage.mjs';
+import { buildXlsx } from '../lib/xlsx.mjs';
 import { driveId, directUrl, fetchRange } from '../lib/remote-audio.mjs';
 import crypto from 'node:crypto';
 
@@ -876,7 +877,7 @@ async function studentStats(userId) {
 }
 route('GET', '/dashboard/student/:id', 'staff', async ({ params }) => studentStats(params.id));
 
-// ================================================================ XUẤT CSV
+// ================================================================ XUẤT FILE KẾT QUẢ (EXCEL)
 route('GET', '/export/class/:id', 'staff', async ({ params }) => {
   const cid = int(params.id);
   const [cls, assigns, students, best] = await Promise.all([
@@ -888,8 +889,7 @@ route('GET', '/export/class/:id', 'staff', async ({ params }) => {
   ]);
   if (!cls) fail(404, 'Không tìm thấy lớp');
   const map = new Map(best.map((b) => [`${b.user_id}-${b.assignment_id}`, b.best]));
-  const esc = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`;
-  // 5 bài giao gần nhất (xếp từ cũ đến mới), điểm cao nhất của mỗi em quy về thang 10, dấu phẩy thập phân kiểu Việt Nam
+  // 5 bài giao gần nhất (xếp từ cũ đến mới), điểm cao nhất của mỗi em quy về thang 10
   const recent = assigns.slice(-5);
   const d2 = (v) => {
     const t = v ? new Date(v) : null;
@@ -897,11 +897,18 @@ route('GET', '/export/class/:id', 'staff', async ({ params }) => {
     const vn = new Date(t.getTime() + 7 * 3600e3); // giờ Việt Nam
     return `${String(vn.getUTCDate()).padStart(2, '0')}/${String(vn.getUTCMonth() + 1).padStart(2, '0')}`;
   };
-  const ten = (v) => (v == null ? '' : (Math.round(v) / 10).toFixed(1).replace('.', ','));
-  const rows = [['STT', 'Họ tên', 'Tên đăng nhập', ...recent.map((a) => `${a.title} (giao ${d2(a.created_at)}) – điểm /10`)]];
+  const ten = (v) => (v == null ? null : Math.round(v) / 10);
+  // Excel: cột hẹp, tên bài tự xuống dòng → phụ huynh xem điểm trên điện thoại dễ hơn
+  const rows = [['STT', 'Họ tên', 'Tên đăng nhập', ...recent.map((a) => `${a.title}\n(giao ${d2(a.created_at)})`)]];
   students.forEach((s, i) => {
     rows.push([i + 1, s.full_name, s.username, ...recent.map((a) => ten(map.get(`${s.id}-${a.id}`)))]);
   });
-  const csv = '﻿' + rows.map((r) => r.map(esc).join(',')).join('\r\n');
-  return new Response(csv, { headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="ket-qua-lop-${cls.id}.csv"` } });
+  const longest = Math.max(0, ...recent.map((a) => a.title.length));
+  const xlsx = buildXlsx({
+    sheetName: `Lop ${cls.name}`, title: `Kết quả lớp ${cls.name} – điểm thang 10 (lần làm cao nhất)`, rows, freeze: 2,
+    widths: [5, Math.min(22, Math.max(12, ...students.map((s) => (s.full_name || '').length + 2))), 13, ...recent.map(() => 15)],
+    headerHeight: Math.min(110, 16 * Math.ceil(longest / 16) + 18),
+  });
+  const slug = String(cls.name).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D').replace(/[^\w-]+/g, '-');
+  return new Response(xlsx, { headers: { 'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'content-disposition': `attachment; filename="ket-qua-${slug}.xlsx"` } });
 });

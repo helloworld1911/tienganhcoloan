@@ -209,7 +209,7 @@ export async function classDetail({ id }) {
   const main = layout(`
     <div class="page-head"><div><div class="crumbs"><a href="#/admin/classes">Lớp</a> / ${esc(c.name)}</div><h1>Lớp ${esc(c.name)}</h1>
       <p>${gradeName(c.grade)}${c.school_year ? ' · ' + esc(c.school_year) : ''} · Mã lớp <span class="code">${esc(c.join_code)}</span> <button class="link-btn small" id="regen">đổi mã</button></p></div>
-      <div class="row"><button class="btn ghost" id="edit">Sửa lớp</button><button class="btn ghost" id="csv">⬇️ Xuất CSV</button>${state.user.role === 'admin' ? '<button class="btn accent" id="addSt">+ Thêm học sinh</button>' : ''}</div></div>
+      <div class="row"><button class="btn ghost" id="edit">Sửa lớp</button><button class="btn ghost" id="csv">⬇️ Xuất Excel</button>${state.user.role === 'admin' ? '<button class="btn accent" id="addSt">+ Thêm học sinh</button>' : ''}</div></div>
     <div class="grid g4 mb">
       <div class="card kpi accent"><span class="v">${d.students.length}</span><span class="l">học sinh</span></div>
       <div class="card kpi"><span class="v">${d.assignCount}</span><span class="l">bài đã giao</span></div>
@@ -267,7 +267,7 @@ export async function classDetail({ id }) {
   });
   $('#regen', main).onclick = async () => { if (await confirmBox('Tạo mã lớp mới? Mã cũ sẽ không dùng được nữa.')) { await post(`/classes/${c.id}/code`); classDetail({ id }); } };
   $('#csv', main).onclick = async () => {
-    try { const res = await api('/export/class/' + c.id, { raw: true }); const blob = await res.blob(); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `ket-qua-${c.name}.csv`; a.click(); } catch (err) { toast(err.message, 'err'); }
+    try { const res = await api('/export/class/' + c.id, { raw: true }); const blob = await res.blob(); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `ket-qua-${c.name}.xlsx`; a.click(); } catch (err) { toast(err.message, 'err'); }
   };
   $('#edit', main).onclick = () => modal(`<h2>Sửa lớp</h2>${classForm(c)}<div class="actions">${state.user.role === 'admin' ? '<button class="btn danger" id="dl" style="margin-right:auto">Xoá lớp</button>' : ''}<button class="btn ghost" data-close>Huỷ</button><button class="btn" id="ok">Lưu</button></div>`, {
     onMount: (m, close) => {

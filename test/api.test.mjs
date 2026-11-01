@@ -113,7 +113,8 @@ ok(sd.attempts.length === 2, 'tiến trình học sinh');
 const ar = await call('GET', `/assignments/${asg[0].id}/results`);
 ok(ar.students.length === 2 && ar.items.length > 30, 'kết quả theo bài + phân tích câu hỏi');
 const csv = await call('GET', `/export/class/${c6a.id}`);
-ok(csv.includes('Nguyễn An') && csv.includes('điểm /10') && !csv.includes('Trung bình') && !csv.includes('(%)'), 'xuất CSV (5 bài gần nhất, thang 10, không có điểm TB)');
+ok(csv.startsWith('PK') && csv.includes('Nguyễn An') && csv.includes('thang 10') && csv.includes('customWidth') && !csv.includes('Trung bình'), 'xuất Excel (5 bài gần nhất, thang 10, cột hẹp, không có điểm TB)');
+if (process.env.XLSX_OUT) { const r = await api(new Request('http://localhost/api/export/class/' + c6a.id, { headers: { authorization: 'Bearer ' + token } })); (await import('node:fs')).writeFileSync(process.env.XLSX_OUT, Buffer.from(await r.arrayBuffer())); }
 const rg = await call('POST', '/attempts/regrade-text');
 ok(typeof rg.attempts === 'number' && typeof rg.fixed === 'number', 'chấm lại câu điền/viết theo quy tắc mới');
 
