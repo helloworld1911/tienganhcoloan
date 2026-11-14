@@ -674,7 +674,7 @@ async function attemptView(id, user) {
     id: t.id, kind: t.kind, title: t.title, student: { id: t.user_id, fullName: t.full_name, username: t.username, className: t.class_name },
     score: num(t.score), maxScore: num(t.max_score), percent: num(t.percent), needsGrading: t.needs_grading,
     startedAt: t.started_at, submittedAt: t.submitted_at, durationSec: t.duration_sec,
-    showAnswers: show, answers: t.answers, results, content,
+    showAnswers: show, showMode: t.show_answers || 'after_submit', answers: t.answers, results, content,
   };
 }
 route('GET', '/attempts/:id', 'auth', async ({ params, user }) => attemptView(params.id, user));
