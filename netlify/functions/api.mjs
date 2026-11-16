@@ -882,14 +882,15 @@ route('GET', '/export/class/:id', 'staff', async ({ params }) => {
   const cid = int(params.id);
   const [cls, assigns, students, best] = await Promise.all([
     one('SELECT * FROM classes WHERE id=$1', [cid]),
-    q(`SELECT a.id, COALESCE(a.title,e.title) AS title, a.created_at FROM assignments a JOIN exams e ON e.id=a.exam_id WHERE a.class_id=$1 ORDER BY a.created_at`, [cid]),
+    q(`SELECT a.id, COALESCE(a.title,e.title) AS title, COALESCE(a.opens_at, a.created_at) AS created_at FROM assignments a JOIN exams e ON e.id=a.exam_id
+       WHERE a.class_id=$1 AND (a.opens_at IS NULL OR a.opens_at <= now()) ORDER BY COALESCE(a.opens_at, a.created_at), a.id`, [cid]),
     q(`SELECT id, full_name, username FROM users WHERE class_id=$1 AND role='student' ORDER BY full_name`, [cid]),
     q(`SELECT t.user_id, t.assignment_id, max(t.percent)::float AS best FROM attempts t JOIN assignments a ON a.id=t.assignment_id
        WHERE a.class_id=$1 AND t.status='submitted' GROUP BY t.user_id, t.assignment_id`, [cid]),
   ]);
   if (!cls) fail(404, 'Không tìm thấy lớp');
   const map = new Map(best.map((b) => [`${b.user_id}-${b.assignment_id}`, b.best]));
-  // 5 bài giao gần nhất (xếp từ cũ đến mới), điểm cao nhất của mỗi em quy về thang 10
+  // 5 bài đã mở gần nhất (bỏ bài hẹn giờ chưa mở; xếp theo ngày mở, từ cũ đến mới), điểm cao nhất của mỗi em quy về thang 10
   const recent = assigns.slice(-5);
   const d2 = (v) => {
     const t = v ? new Date(v) : null;
